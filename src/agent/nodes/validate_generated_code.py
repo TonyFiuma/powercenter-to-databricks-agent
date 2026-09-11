@@ -83,6 +83,21 @@ UNRESOLVED_MARKERS = [
     "requires resolution",
 ]
 
+HUMAN_REVIEW_PLAN_MARKER = (
+    "[HUMAN_REVIEW_SUGGESTION]"
+)
+
+HUMAN_REVIEW_BEGIN_MARKER = (
+    "BEGIN HUMAN_REVIEW_SUGGESTION"
+)
+
+HUMAN_REVIEW_END_MARKER = (
+    "END HUMAN_REVIEW_SUGGESTION"
+)
+
+HUMAN_REVIEW_REQUIRED_MARKER = (
+    "HUMAN REVIEW REQUIRED"
+)
 
 def remove_comments(
     code: str,
@@ -494,7 +509,267 @@ def validate_unresolved_source_configuration(
 
     return violations
 
+def validate_human_review_safety(
+    code: str,
+    migration_plan: str,
+) -> list[str]:
+    """
+    Validate that HUMAN_REVIEW_SUGGESTION material
+    remains completely non-executable.
 
+    Human-review suggestions are allowed only when the
+    validated migration plan contains an explicit
+    [HUMAN_REVIEW_SUGGESTION].
+
+    Generated Human Review material must be enclosed by:
+
+    # BEGIN HUMAN_REVIEW_SUGGESTION
+    ...
+    # END HUMAN_REVIEW_SUGGESTION
+
+    Every non-empty line inside the block must remain
+    a Python comment.
+    """
+
+    violations = []
+
+    plan_lower = migration_plan.lower()
+
+    plan_has_human_review = (
+        HUMAN_REVIEW_PLAN_MARKER.lower()
+        in plan_lower
+    )
+
+    lines = code.splitlines()
+
+    begin_indexes = []
+    end_indexes = []
+
+    # ========================================================
+    # Locate BEGIN / END markers
+    # ========================================================
+
+    for index, line in enumerate(
+        lines
+    ):
+        stripped = line.strip()
+        stripped_lower = stripped.lower()
+
+        if (
+            HUMAN_REVIEW_BEGIN_MARKER.lower()
+            in stripped_lower
+        ):
+            begin_indexes.append(
+                index
+            )
+
+            if not stripped.startswith("#"):
+                violations.append(
+                    "BEGIN HUMAN_REVIEW_SUGGESTION "
+                    "marker must be a Python comment "
+                    f"at line {index + 1}."
+                )
+
+        if (
+            HUMAN_REVIEW_END_MARKER.lower()
+            in stripped_lower
+        ):
+            end_indexes.append(
+                index
+            )
+
+            if not stripped.startswith("#"):
+                violations.append(
+                    "END HUMAN_REVIEW_SUGGESTION "
+                    "marker must be a Python comment "
+                    f"at line {index + 1}."
+                )
+
+    code_has_human_review = bool(
+        begin_indexes
+        or end_indexes
+    )
+
+    # ========================================================
+    # Generated code must not invent a Human Review suggestion
+    # ========================================================
+
+    if (
+        code_has_human_review
+        and not plan_has_human_review
+    ):
+        violations.append(
+            "Generated code contains a "
+            "HUMAN_REVIEW_SUGGESTION that does not "
+            "exist in the validated migration plan."
+        )
+
+    # ========================================================
+    # A validated suggestion must not disappear
+    # ========================================================
+
+    if (
+        plan_has_human_review
+        and not code_has_human_review
+    ):
+        violations.append(
+            "Validated migration plan contains a "
+            "HUMAN_REVIEW_SUGGESTION, but generated "
+            "code does not preserve it inside an explicit "
+            "BEGIN/END human-review block."
+        )
+
+        return violations
+
+    if not code_has_human_review:
+        return violations
+
+    # ========================================================
+    # BEGIN / END markers must be balanced
+    # ========================================================
+
+    if (
+        len(begin_indexes)
+        != len(end_indexes)
+    ):
+        violations.append(
+            "HUMAN_REVIEW_SUGGESTION markers are "
+            "unbalanced: every BEGIN marker must have "
+            "exactly one END marker."
+        )
+
+        return violations
+
+    # ========================================================
+    # Validate every Human Review block
+    # ========================================================
+
+    previous_end_index = -1
+
+    for block_number, (
+        begin_index,
+        end_index,
+    ) in enumerate(
+        zip(
+            begin_indexes,
+            end_indexes,
+        ),
+        start=1,
+    ):
+        # ----------------------------------------------------
+        # Prevent overlapping / malformed blocks
+        # ----------------------------------------------------
+
+        if begin_index <= previous_end_index:
+            violations.append(
+                "HUMAN_REVIEW_SUGGESTION "
+                f"{block_number} overlaps a previous "
+                "Human Review block."
+            )
+
+        if end_index <= begin_index:
+            violations.append(
+                "HUMAN_REVIEW_SUGGESTION "
+                f"{block_number} has END before BEGIN."
+            )
+
+            continue
+
+        previous_end_index = end_index
+
+        block_lines = lines[
+            begin_index:end_index + 1
+        ]
+
+        # ----------------------------------------------------
+        # Every line must be non-executable
+        # ----------------------------------------------------
+
+        for relative_index, line in enumerate(
+            block_lines
+        ):
+            line_number = (
+                begin_index
+                + relative_index
+                + 1
+            )
+
+            stripped = line.strip()
+
+            if not stripped:
+                continue
+
+            if not stripped.startswith("#"):
+                violations.append(
+                    "Executable code detected inside "
+                    "HUMAN_REVIEW_SUGGESTION "
+                    f"{block_number} at line "
+                    f"{line_number}: {stripped}"
+                )
+
+        block_text = "\n".join(
+            block_lines
+        ).lower()
+
+        # ----------------------------------------------------
+        # Required Human Review metadata
+        # ----------------------------------------------------
+
+        if (
+            HUMAN_REVIEW_REQUIRED_MARKER.lower()
+            not in block_text
+        ):
+            violations.append(
+                "HUMAN_REVIEW_SUGGESTION "
+                f"{block_number} is missing "
+                "'HUMAN REVIEW REQUIRED'."
+            )
+
+        if (
+            "status: human_review_suggestion"
+            not in block_text
+        ):
+            violations.append(
+                "HUMAN_REVIEW_SUGGESTION "
+                f"{block_number} is missing "
+                "'Status: HUMAN_REVIEW_SUGGESTION'."
+            )
+
+        if "confidence:" not in block_text:
+            violations.append(
+                "HUMAN_REVIEW_SUGGESTION "
+                f"{block_number} is missing "
+                "a confidence level."
+            )
+
+        if not (
+            "confidence: low"
+            in block_text
+            or "confidence: medium"
+            in block_text
+        ):
+            violations.append(
+                "HUMAN_REVIEW_SUGGESTION "
+                f"{block_number} must use "
+                "Confidence: LOW or "
+                "Confidence: MEDIUM."
+            )
+
+        if (
+            "not an approved"
+            not in block_text
+            and
+            "not approved"
+            not in block_text
+        ):
+            violations.append(
+                "HUMAN_REVIEW_SUGGESTION "
+                f"{block_number} does not clearly "
+                "state that the suggestion is not "
+                "an approved migration implementation."
+            )
+
+    return violations
 
 def validate_python_syntax(
     code: str,
@@ -543,176 +818,6 @@ def validate_python_syntax(
         )
 
     return violations
-
-def validate_mapping_code(
-    code: str,
-    single_mapping: dict,
-) -> list[str]:
-
-    violations = []
-
-    violations.extend(
-        validate_python_syntax(code)
-    )
-
-    violations.extend(
-        validate_structural_completeness(code)
-    )
-
-    violations.extend(
-        validate_setvariable_usage(
-            code,
-            single_mapping,
-        )
-    )
-
-    violations.extend(
-        validate_setvariable_preservation(
-            code,
-            single_mapping,
-        )
-    )
-
-    violations.extend(
-        validate_flat_file_target(
-            code,
-            single_mapping,
-        )
-    )
-
-    violations.extend(
-        validate_unresolved_source_configuration(
-            code,
-            single_mapping,
-        )
-    )
-
-    return violations
-
-
-def validate_generated_code_node(
-    state: AgentState,
-) -> dict:
-    """
-    Validate the generated PySpark for every parsed PowerCenter mapping.
-
-    The result shape is intentionally compatible with the repair node:
-    each mapping result contains mapping_name, passed, and violations.
-    """
-
-    print(
-        "\nValidating generated PySpark..."
-    )
-
-    mapping = state["mapping"]
-
-    generated_codes = state.get(
-        "generated_codes",
-        {},
-    )
-
-    pc_mappings = mapping.get(
-        "mappings",
-        [],
-    )
-
-    print(
-        f"Mappings to validate: "
-        f"{len(pc_mappings)}"
-    )
-
-    validation_results = []
-
-    for index, pc_mapping in enumerate(
-        pc_mappings,
-        start=1,
-    ):
-        mapping_name = pc_mapping.get(
-            "name",
-            "UNKNOWN_MAPPING",
-        )
-
-        print("")
-        print(
-            f"[{index}/{len(pc_mappings)}] "
-            f"Validating: {mapping_name}"
-        )
-
-        code = generated_codes.get(
-            mapping_name
-        )
-
-        if (
-            not isinstance(code, str)
-            or not code.strip()
-        ):
-            violations = [
-                "Generated PySpark code not found "
-                "for this mapping."
-            ]
-
-        else:
-            single_mapping = (
-                build_single_mapping_input(
-                    full_mapping=mapping,
-                    pc_mapping=pc_mapping,
-                )
-            )
-
-            violations = (
-                validate_mapping_code(
-                    code=code,
-                    single_mapping=single_mapping,
-                )
-            )
-
-        passed = not violations
-
-        validation_results.append(
-            {
-                "mapping_name": mapping_name,
-                "passed": passed,
-                "violations": violations,
-            }
-        )
-
-        if passed:
-            print(
-                "Validation passed."
-            )
-        else:
-            print(
-                "Validation failed."
-            )
-
-            for violation in violations:
-                print(
-                    f"  - {violation}"
-                )
-
-    validation_passed = all(
-        result["passed"]
-        for result in validation_results
-    )
-
-    print("")
-    print(
-        "Overall validation: "
-        + (
-            "PASSED"
-            if validation_passed
-            else "FAILED"
-        )
-    )
-
-    return {
-        "validation_results": (
-            validation_results
-        ),
-        "validation_passed": (
-            validation_passed
-        ),
-    }
 
 def validate_structural_completeness(
     code: str,
@@ -780,3 +885,213 @@ def validate_structural_completeness(
         )
 
     return violations
+
+def validate_mapping_code(
+    code: str,
+    single_mapping: dict[str, Any],
+    migration_plan: str = "",
+) -> list[str]:
+    """
+    Run all deterministic validation rules for one generated mapping.
+
+    The validator combines:
+
+    - Python syntax validation
+    - negative anti-hallucination checks
+    - positive preservation checks
+    - HUMAN_REVIEW_SUGGESTION safety validation
+
+    HUMAN REVIEW material may exist in generated code only
+    when it originated from the validated migration plan and
+    remains entirely non-executable.
+    """
+
+    violations = []
+
+    violations.extend(
+        validate_python_syntax(
+            code=code,
+        )
+    )
+
+    violations.extend(
+        validate_structural_completeness(
+            code=code,
+        )
+    )
+
+    violations.extend(
+        validate_human_review_safety(
+            code=code,
+            migration_plan=migration_plan,
+        )
+    )
+
+    violations.extend(
+        validate_setvariable_usage(
+            code=code,
+            single_mapping=single_mapping,
+        )
+    )
+
+    violations.extend(
+        validate_setvariable_preservation(
+            code=code,
+            single_mapping=single_mapping,
+        )
+    )
+
+    violations.extend(
+        validate_flat_file_target(
+            code=code,
+            single_mapping=single_mapping,
+        )
+    )
+
+    violations.extend(
+        validate_unresolved_source_configuration(
+            code=code,
+            single_mapping=single_mapping,
+        )
+    )
+
+    return violations
+
+
+def validate_generated_code_node(
+    state: AgentState,
+) -> dict:
+    """
+    Validate the generated PySpark for every parsed PowerCenter mapping.
+
+    The result shape is intentionally compatible with the repair node:
+    each mapping result contains mapping_name, passed, and violations.
+    """
+
+    print(
+        "\nValidating generated PySpark..."
+    )
+
+    mapping = state["mapping"]
+
+    generated_codes = state.get(
+        "generated_codes",
+        {},
+    )
+
+    migration_plans = state.get(
+        "migration_plans",
+        {},
+    )
+    
+    pc_mappings = mapping.get(
+        "mappings",
+        [],
+    )
+
+    print(
+        f"Mappings to validate: "
+        f"{len(pc_mappings)}"
+    )
+
+    validation_results = []
+
+    for index, pc_mapping in enumerate(
+        pc_mappings,
+        start=1,
+    ):
+        mapping_name = pc_mapping.get(
+            "name",
+            "UNKNOWN_MAPPING",
+        )
+
+        print("")
+        print(
+            f"[{index}/{len(pc_mappings)}] "
+            f"Validating: {mapping_name}"
+        )
+
+        code = generated_codes.get(
+            mapping_name
+        )
+
+        migration_plan = migration_plans.get(
+           mapping_name,
+            "",
+        )
+        if (
+            not isinstance(code, str)
+            or not code.strip()
+        ):
+            violations = [
+                "Generated PySpark code not found "
+                "for this mapping."
+            ]
+
+        else:
+            single_mapping = (
+                build_single_mapping_input(
+                    full_mapping=mapping,
+                    pc_mapping=pc_mapping,
+                )
+            )
+
+            violations = (
+                validate_mapping_code(
+                code=code,
+                single_mapping=single_mapping,
+                migration_plan=migration_plan,
+                )
+            )
+
+        passed = not violations
+
+        validation_results.append(
+            {
+                "mapping_name": mapping_name,
+                "passed": passed,
+                "violations": violations,
+            }
+        )
+
+        if passed:
+            print(
+                "Validation passed."
+            )
+        else:
+            print(
+                "Validation failed."
+            )
+
+            for violation in violations:
+                print(
+                    f"  - {violation}"
+                )
+
+        validation_passed = (
+            len(validation_results) > 0
+            and all(
+                result["passed"]
+                for result in validation_results
+            )
+        )
+
+    print("")
+    print(
+        "Overall validation: "
+        + (
+            "PASSED"
+            if validation_passed
+            else "FAILED"
+        )
+    )
+
+    return {
+        "validation_results": (
+            validation_results
+        ),
+        "validation_passed": (
+            validation_passed
+        ),
+    }
+

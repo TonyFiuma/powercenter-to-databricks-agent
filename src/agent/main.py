@@ -15,11 +15,17 @@ def main():
 
     result = app.invoke(
         {
-            "xml_path": "data/input/wf_m_DHUBTOMIS_MBDT_CSV.XML"
+            "xml_path": "data/input/wf_m_DHUBTOMIS_MBDT_CSV.XML",
+            "powercenter_version": "10.5.7",
         }
     )
 
     print("\nSTATE KEYS:")
+    print("\nPOWERCENTER VERSION:")
+    print(result.get("powercenter_version"))
+
+    print("\nPOWERCENTER VERSION SOURCE:")
+    print(result.get("powercenter_version_source"))
     print(result.keys())
 
     print("\nVALIDATION PASSED VALUE:")

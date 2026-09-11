@@ -1,48 +1,46 @@
-from typing import Any, TypedDict
+from typing import TypedDict, Any
 
 
-class AgentState(
-    TypedDict,
-    total=False,
-):
+class AgentState(TypedDict, total=False):
+    """
+    Shared state of the PowerCenter -> Databricks migration graph.
+    """
+
     # Input
     xml_path: str
 
-    # Parsed PowerCenter structure
+    # PowerCenter metadata
+    powercenter_version: str
+    powercenter_version_source: str
+
+    # Parser output
     mapping: dict[str, Any]
+
+    # Transformation analysis
+    detected_transformations: list[str]
+    unsupported_transformations: list[str]
 
     # RAG
     retrieval_query: str
+    retrieval_filters: dict[str, Any]
     retrieved_docs: list[Any]
 
-    # Migration planning
+    # Migration plans
     migration_plan: str
     migration_plans: dict[str, str]
 
     # Migration-plan validation
-    migration_plan_validation_results: list[
-        dict[str, Any]
-    ]
+    migration_plan_validation_results: list[dict[str, Any]]
     migration_plan_validation_passed: bool
-
-    # Migration-plan repair loop
     migration_plan_repair_attempts: int
 
-    # PySpark generation
+    # Generated PySpark
     pyspark_code: str
     generated_codes: dict[str, str]
 
-    # PySpark validation
-    validation_results: list[
-        dict[str, Any]
-    ]
+    # Generated-code validation
+    validation_results: list[dict[str, Any]]
     validation_passed: bool
-
-    # PySpark repair loop
+    validation_status: str
+    validation_issues: list[dict[str, Any]]
     repair_attempts: int
-
-
-    # Final migration artifacts
-    migration_report: dict[str, Any]
-    migration_report_path: str
-    exported_files: dict[str, str]

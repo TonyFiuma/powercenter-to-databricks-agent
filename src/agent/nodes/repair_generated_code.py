@@ -27,6 +27,156 @@ from src.storage.generated_code_store import (
 llm = get_generator_llm()
 
 
+HUMAN_REVIEW_BEGIN_MARKER = (
+    "BEGIN HUMAN_REVIEW_SUGGESTION"
+)
+
+HUMAN_REVIEW_END_MARKER = (
+    "END HUMAN_REVIEW_SUGGESTION"
+)
+
+
+def enforce_human_review_comment_safety(
+    code: str,
+) -> str:
+    """
+    Ensure that every line inside a generated
+    HUMAN_REVIEW_SUGGESTION block is a Python comment.
+
+    Expected structure:
+
+    # BEGIN HUMAN_REVIEW_SUGGESTION
+    # ...
+    # suggested_code = ...
+    # END HUMAN_REVIEW_SUGGESTION
+
+    If the LLM accidentally produces executable code inside
+    the block, this function comments it out deterministically
+    before the repaired code is persisted.
+
+    This function does not invent, remove, or approve any
+    migration logic. It only prevents human-review material
+    from becoming executable Python.
+    """
+
+    lines = code.splitlines()
+
+    safe_lines = []
+
+    inside_human_review = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # ----------------------------------------------------
+        # BEGIN marker
+        # ----------------------------------------------------
+
+        if (
+            HUMAN_REVIEW_BEGIN_MARKER
+            in stripped.upper()
+        ):
+            inside_human_review = True
+
+            if stripped.startswith("#"):
+                safe_lines.append(
+                    line
+                )
+            else:
+                indentation = (
+                    line[
+                        :len(line)
+                        - len(
+                            line.lstrip()
+                        )
+                    ]
+                )
+
+                safe_lines.append(
+                    f"{indentation}# {stripped}"
+                )
+
+            continue
+
+        # ----------------------------------------------------
+        # END marker
+        # ----------------------------------------------------
+
+        if (
+            HUMAN_REVIEW_END_MARKER
+            in stripped.upper()
+        ):
+            if stripped.startswith("#"):
+                safe_lines.append(
+                    line
+                )
+            else:
+                indentation = (
+                    line[
+                        :len(line)
+                        - len(
+                            line.lstrip()
+                        )
+                    ]
+                )
+
+                safe_lines.append(
+                    f"{indentation}# {stripped}"
+                )
+
+            inside_human_review = False
+
+            continue
+
+        # ----------------------------------------------------
+        # Human-review block
+        # ----------------------------------------------------
+
+        if inside_human_review:
+            # Preserve empty lines.
+            if not stripped:
+                safe_lines.append(
+                    line
+                )
+                continue
+
+            # Already safe.
+            if stripped.startswith("#"):
+                safe_lines.append(
+                    line
+                )
+                continue
+
+            # Anything else would be executable Python.
+            # Comment it out deterministically.
+            indentation = (
+                line[
+                    :len(line)
+                    - len(
+                        line.lstrip()
+                    )
+                ]
+            )
+
+            safe_lines.append(
+                f"{indentation}# {stripped}"
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # Normal executable migration code
+        # ----------------------------------------------------
+
+        safe_lines.append(
+            line
+        )
+
+    return "\n".join(
+        safe_lines
+    )
+
+
 def repair_generated_code_node(
     state: AgentState,
 ) -> dict:
@@ -35,6 +185,11 @@ def repair_generated_code_node(
     deterministic validation.
 
     Only failed mappings are sent back to the LLM.
+
+    HUMAN_REVIEW_SUGGESTION content is additionally
+    protected deterministically before persistence:
+    any line inside a HUMAN REVIEW block is forced
+    to remain a Python comment.
     """
 
     print(
@@ -282,7 +437,28 @@ def repair_generated_code_node(
         )
 
         print(
-            "Repaired PySpark characters: "
+            "Repaired PySpark characters "
+            "before safety enforcement: "
+            f"{len(repaired_code)}"
+        )
+
+        # ----------------------------------------------------
+        # HUMAN REVIEW deterministic safety enforcement
+        # ----------------------------------------------------
+
+        repaired_code = (
+            enforce_human_review_comment_safety(
+                repaired_code
+            )
+        )
+
+        repaired_code = (
+            repaired_code.strip()
+        )
+
+        print(
+            "Repaired PySpark characters "
+            "after safety enforcement: "
             f"{len(repaired_code)}"
         )
 

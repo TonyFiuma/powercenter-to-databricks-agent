@@ -12,7 +12,7 @@ DEFAULT_CACHE_PATH = Path(
 # Cache version
 # ============================================================
 
-PLANNER_CACHE_VERSION = "v2"
+PLANNER_CACHE_VERSION = "v4"
 
 
 # ============================================================

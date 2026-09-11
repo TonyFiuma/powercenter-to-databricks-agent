@@ -21,14 +21,61 @@ def load_vectorstore() -> Chroma:
     return vectorstore
 
 
-def retrieve_documents(vectorstore, query: str, k: int = 3):
+def retrieve_documents(
+    vectorstore,
+    query: str,
+    k: int = 3,
+    filters: dict | None = None,
+):
     """
     Retrieve and rerank PowerCenter documentation chunks.
+
+    Args:
+        vectorstore:
+            PowerCenter Chroma vector store.
+
+        query:
+            Retrieval query.
+
+        k:
+            Number of final reranked documents to return.
+
+        filters:
+            Optional Chroma metadata filters applied
+            before reranking.
+
+            Example:
+
+            {
+                "$and": [
+                    {
+                        "product": {
+                            "$eq": "powercenter"
+                        }
+                    },
+                    {
+                        "version": {
+                            "$eq": "10.5.7"
+                        }
+                    },
+                ]
+            }
+
+    Returns:
+        list:
+            Reranked PowerCenter documentation chunks.
     """
 
+    search_kwargs = {
+        "query": query,
+        "k": 30,
+    }
+
+    if filters:
+        search_kwargs["filter"] = filters
+
     candidates = vectorstore.similarity_search(
-        query=query,
-        k=30,
+        **search_kwargs
     )
 
     query_lower = query.lower()
@@ -63,34 +110,52 @@ def retrieve_documents(vectorstore, query: str, k: int = 3):
         score = 0
 
         if transformation_name:
-            exact_phrase = f"{transformation_name} transformation"
+            exact_phrase = (
+                f"{transformation_name} transformation"
+            )
 
             if exact_phrase in text:
                 score += 20
 
-            score += text.count(exact_phrase) * 5
-            score += text.count(transformation_name) * 2
+            score += (
+                text.count(exact_phrase) * 5
+            )
 
-            if f"{exact_phrase} overview" in text:
+            score += (
+                text.count(transformation_name) * 2
+            )
+
+            if (
+                f"{exact_phrase} overview"
+                in text
+            ):
                 score += 15
 
-            if f"configuring {exact_phrase}" in text:
+            if (
+                f"configuring {exact_phrase}"
+                in text
+            ):
                 score += 15
 
-            if f"creating {exact_phrase}" in text:
+            if (
+                f"creating {exact_phrase}"
+                in text
+            ):
                 score += 10
 
         if "powercenter" in text:
             score += 1
 
         if (
-            transformation_name == "source qualifier"
+            transformation_name
+            == "source qualifier"
             and "xml source qualifier" in text
         ):
             score -= 30
 
         if (
-            transformation_name == "expression"
+            transformation_name
+            == "expression"
             and "java expression" in text
         ):
             score -= 20

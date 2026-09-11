@@ -25,12 +25,25 @@ def retrieve_docs_node(state: AgentState) -> dict:
     """
     Retrieve PowerCenter and Databricks documentation
     for each transformation found in the parsed mapping.
+
+    PowerCenter retrieval is version-aware.
     """
 
     mapping = state["mapping"]
 
-    transformation_types = extract_transformation_types(
-        mapping
+    powercenter_version = state.get(
+        "powercenter_version"
+    )
+
+    if not powercenter_version:
+        raise ValueError(
+            "PowerCenter version not found in agent state."
+        )
+
+    transformation_types = (
+        extract_transformation_types(
+            mapping
+        )
     )
 
     print(
@@ -38,10 +51,36 @@ def retrieve_docs_node(state: AgentState) -> dict:
         f"{transformation_types}"
     )
 
+    print(
+        f"PowerCenter documentation version: "
+        f"{powercenter_version}"
+    )
+
     all_docs = []
     retrieval_queries = []
 
+    # Metadata filter used only for
+    # PowerCenter documentation.
+    retrieval_filters = {
+        "$and": [
+            {
+                "product": {
+                    "$eq": "powercenter"
+                }
+            },
+            {
+                "version": {
+                    "$eq": powercenter_version
+                }
+            },
+        ]
+    }
+
     for transformation_type in transformation_types:
+
+        # ----------------------------------------------
+        # Build retrieval queries
+        # ----------------------------------------------
 
         powercenter_query = (
             build_powercenter_retrieval_query(
@@ -68,16 +107,32 @@ def retrieve_docs_node(state: AgentState) -> dict:
             f"{transformation_type}"
         )
 
+        # ----------------------------------------------
+        # PowerCenter retrieval
+        # ----------------------------------------------
+
         print(
             f"PowerCenter query: "
             f"{powercenter_query}"
         )
 
-        powercenter_docs = retrieve_documents(
-            vectorstore=powercenter_vectorstore,
-            query=powercenter_query,
-            k=1,
+        print(
+            f"PowerCenter filters: "
+            f"{retrieval_filters}"
         )
+
+        powercenter_docs = (
+            retrieve_documents(
+                vectorstore=powercenter_vectorstore,
+                query=powercenter_query,
+                k=1,
+                filters=retrieval_filters,
+            )
+        )
+
+        # ----------------------------------------------
+        # Databricks retrieval
+        # ----------------------------------------------
 
         print(
             f"Databricks query: "
@@ -92,6 +147,10 @@ def retrieve_docs_node(state: AgentState) -> dict:
             )
         )
 
+        # ----------------------------------------------
+        # Collect retrieved documents
+        # ----------------------------------------------
+
         all_docs.extend(
             powercenter_docs
         )
@@ -104,5 +163,6 @@ def retrieve_docs_node(state: AgentState) -> dict:
         "retrieval_query": "\n".join(
             retrieval_queries
         ),
+        "retrieval_filters": retrieval_filters,
         "retrieved_docs": all_docs,
     }

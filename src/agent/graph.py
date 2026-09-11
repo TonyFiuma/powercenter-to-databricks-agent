@@ -34,6 +34,9 @@ from src.agent.nodes.build_migration_report import (
     build_migration_report_node,
 )
 
+from src.agent.nodes.resolve_version import (
+    resolve_powercenter_version_node,
+)
 
 # ============================================================
 # Configuration
@@ -173,15 +176,16 @@ def build_graph():
     Flow:
 
     parser
-      -> retrieval
-      -> migration planner
-      -> migration-plan validator
-          -> repair loop when needed
-      -> PySpark generator
-      -> PySpark validator
-          -> repair loop when needed
-      -> migration artifact export
-      -> END
+    -> PowerCenter version resolution
+    -> retrieval
+    -> migration planner
+    -> migration-plan validator
+        -> repair loop when needed
+    -> PySpark generator
+    -> PySpark validator
+        -> repair loop when needed
+    -> migration artifact export
+    -> END
     """
 
     graph = StateGraph(
@@ -195,6 +199,11 @@ def build_graph():
     graph.add_node(
         "parse_mapping",
         parse_mapping_node,
+    )
+
+    graph.add_node(
+        "resolve_powercenter_version",
+        resolve_powercenter_version_node,
     )
 
     graph.add_node(
@@ -248,6 +257,11 @@ def build_graph():
 
     graph.add_edge(
         "parse_mapping",
+        "resolve_powercenter_version",
+    )
+
+    graph.add_edge(
+        "resolve_powercenter_version",
         "retrieve_docs",
     )
 

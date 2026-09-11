@@ -4,22 +4,37 @@ def build_single_mapping_input(
 ) -> dict:
     """
     Create a reduced PowerCenter structure containing
-    only one mapping while preserving the global source
-    and target definitions required by the context resolver.
+    only one mapping.
 
-    This helper is shared by planner and generator nodes.
+    Prefer mapping-specific enriched source and target metadata
+    when available, because they include runtime/session information
+    such as target Flat File overrides.
+
+    Fall back to global Source/Target Definitions when mapping-level
+    metadata is not available.
     """
 
     return {
         "repository": full_mapping.get("repository"),
         "folder": full_mapping.get("folder"),
-        "sources": full_mapping.get("sources", []),
-        "targets": full_mapping.get("targets", []),
+
+        "sources": (
+            pc_mapping.get("sources")
+            or full_mapping.get("sources", [])
+        ),
+
+        "targets": (
+            pc_mapping.get("targets")
+            or full_mapping.get("targets", [])
+        ),
+
         "mappings": [pc_mapping],
     }
 
 
-def build_instance_lookup(pc_mapping: dict) -> dict:
+def build_instance_lookup(
+    pc_mapping: dict,
+) -> dict:
     """
     Build a lookup that maps PowerCenter instance names
     to their instance metadata.
@@ -27,7 +42,10 @@ def build_instance_lookup(pc_mapping: dict) -> dict:
 
     return {
         instance["name"]: instance
-        for instance in pc_mapping.get("instances", [])
+        for instance in pc_mapping.get(
+            "instances",
+            [],
+        )
         if instance.get("name")
     }
 
@@ -46,13 +64,17 @@ def resolve_definition_name(
     if not node_name:
         return None
 
-    instance = instance_lookup.get(node_name)
+    instance = instance_lookup.get(
+        node_name
+    )
 
     if not instance:
         return node_name
 
     return (
-        instance.get("transformation_name")
+        instance.get(
+            "transformation_name"
+        )
         or node_name
     )
 
@@ -64,11 +86,13 @@ def collect_mapping_endpoints(
     """
     Collect source and target instances used by a mapping.
 
-    Returns dictionaries in the following form:
+    Returns:
+        tuple[dict, dict]:
+            Source and target dictionaries in the form:
 
-    {
-        definition_name: instance_name
-    }
+            {
+                definition_name: instance_name
+            }
     """
 
     sources = {}
@@ -76,8 +100,14 @@ def collect_mapping_endpoints(
 
     for connection in data_flow:
         for node in (
-            connection.get("from", {}),
-            connection.get("to", {}),
+            connection.get(
+                "from",
+                {},
+            ),
+            connection.get(
+                "to",
+                {},
+            ),
         ):
             node_type = node.get("type")
             instance_name = node.get("name")
@@ -85,38 +115,258 @@ def collect_mapping_endpoints(
             if not instance_name:
                 continue
 
-            definition_name = resolve_definition_name(
-                node,
-                instance_lookup,
+            definition_name = (
+                resolve_definition_name(
+                    node,
+                    instance_lookup,
+                )
             )
 
             if not definition_name:
                 continue
 
             if node_type == "SOURCE":
-                sources[definition_name] = instance_name
+                sources[
+                    definition_name
+                ] = instance_name
 
             elif node_type == "TARGET":
-                targets[definition_name] = instance_name
+                targets[
+                    definition_name
+                ] = instance_name
 
     return sources, targets
 
 
-def build_mapping_context(mapping: dict) -> str:
+def append_flat_file_config(
+    lines: list,
+    title: str,
+    config: dict | None,
+) -> None:
+    """
+    Append Flat File configuration to the mapping context.
+
+    Only properties explicitly parsed from the PowerCenter
+    XML are included.
+    """
+
+    if not config:
+        return
+
+    lines.append(
+        f"  {title}:"
+    )
+
+    properties = (
+        (
+            "codepage",
+            "codepage",
+        ),
+        (
+            "delimited",
+            "delimited",
+        ),
+        (
+            "delimiter",
+            "delimiter",
+        ),
+        (
+            "quote_character",
+            "quote_character",
+        ),
+        (
+            "null_character",
+            "null_character",
+        ),
+        (
+            "row_delimiter",
+            "row_delimiter",
+        ),
+        (
+            "skip_rows",
+            "skip_rows",
+        ),
+        (
+            "strip_trailing_blanks",
+            "strip_trailing_blanks",
+        ),
+    )
+
+    for key, label in properties:
+        value = config.get(key)
+
+        if value is not None:
+            lines.append(
+                f"    {label}: {value}"
+            )
+
+
+def append_transformation_fields(
+    lines: list,
+    fields: list,
+) -> None:
+    """
+    Append transformation fields in a compact form.
+
+    Pass-through INPUT/OUTPUT fields are grouped into a
+    single line to reduce prompt size.
+
+    Fields with non-trivial expressions are preserved
+    individually with their full expression because they
+    are migration-relevant.
+
+    Other ports, such as INPUT-only or OUTPUT-only fields,
+    are also retained.
+    """
+
+    passthrough_fields = []
+    other_ports = []
+    non_trivial_fields = []
+
+    for field in fields:
+        field_name = field.get(
+            "name"
+        )
+
+        datatype = field.get(
+            "datatype"
+        )
+
+        port_type = field.get(
+            "port_type"
+        )
+
+        expression = field.get(
+            "expression"
+        )
+
+        if not field_name:
+            continue
+
+        is_non_trivial_expression = (
+            expression
+            and expression.strip()
+            != field_name.strip()
+        )
+
+        if is_non_trivial_expression:
+            non_trivial_fields.append(
+                {
+                    "name": field_name,
+                    "datatype": datatype,
+                    "port_type": port_type,
+                    "expression": expression,
+                }
+            )
+
+            continue
+
+        if port_type == "INPUT/OUTPUT":
+            passthrough_fields.append(
+                field_name
+            )
+
+        elif port_type:
+            other_ports.append(
+                {
+                    "name": field_name,
+                    "datatype": datatype,
+                    "port_type": port_type,
+                }
+            )
+
+    if passthrough_fields:
+        lines.append(
+            "  pass_through_fields: "
+            + ", ".join(
+                passthrough_fields
+            )
+        )
+
+    if other_ports:
+        lines.append(
+            "  other_ports:"
+        )
+
+        for field in other_ports:
+            field_line = (
+                f"    - {field['name']}"
+            )
+
+            if field["datatype"]:
+                field_line += (
+                    " | datatype: "
+                    f"{field['datatype']}"
+                )
+
+            if field["port_type"]:
+                field_line += (
+                    " | port_type: "
+                    f"{field['port_type']}"
+                )
+
+            lines.append(
+                field_line
+            )
+
+    for field in non_trivial_fields:
+        field_line = (
+            f"  - {field['name']}"
+        )
+
+        if field["datatype"]:
+            field_line += (
+                " | datatype: "
+                f"{field['datatype']}"
+            )
+
+        if field["port_type"]:
+            field_line += (
+                " | port_type: "
+                f"{field['port_type']}"
+            )
+
+        lines.append(
+            field_line
+        )
+
+        lines.append(
+            "    expression: "
+            f"{field['expression']}"
+        )
+
+
+def build_mapping_context(
+    mapping: dict,
+) -> str:
     """
     Build a compact migration-relevant context from the parsed
     PowerCenter structure.
 
     The context explicitly distinguishes:
 
-    - instance name: object used inside the PowerCenter mapping
-    - definition name: underlying Source/Target Definition
+    - instance name;
+    - underlying Source/Target Definition;
+    - source database metadata;
+    - transformation behavior;
+    - target definition configuration;
+    - session-level target overrides;
+    - effective target runtime configuration;
+    - mapping data flow.
+
+    Pass-through transformation fields are grouped to reduce
+    prompt size while preserving migration-relevant expressions.
     """
 
     lines = []
 
-    repository = mapping.get("repository")
-    folder = mapping.get("folder")
+    repository = mapping.get(
+        "repository"
+    )
+
+    folder = mapping.get(
+        "folder"
+    )
 
     if repository:
         lines.append(
@@ -130,13 +380,19 @@ def build_mapping_context(mapping: dict) -> str:
 
     sources_by_name = {
         source.get("name"): source
-        for source in mapping.get("sources", [])
+        for source in mapping.get(
+            "sources",
+            [],
+        )
         if source.get("name")
     }
 
     targets_by_name = {
         target.get("name"): target
-        for target in mapping.get("targets", [])
+        for target in mapping.get(
+            "targets",
+            [],
+        )
         if target.get("name")
     }
 
@@ -149,11 +405,17 @@ def build_mapping_context(mapping: dict) -> str:
         )
 
         lines.append("")
-        lines.append("=" * 60)
+        lines.append(
+            "=" * 60
+        )
+
         lines.append(
             f"Mapping: {mapping_name}"
         )
-        lines.append("=" * 60)
+
+        lines.append(
+            "=" * 60
+        )
 
         data_flow = pc_mapping.get(
             "data_flow",
@@ -176,7 +438,9 @@ def build_mapping_context(mapping: dict) -> str:
 
         if source_endpoints:
             lines.append("")
-            lines.append("SOURCES:")
+            lines.append(
+                "SOURCES:"
+            )
 
             for definition_name in sorted(
                 source_endpoints
@@ -187,8 +451,10 @@ def build_mapping_context(mapping: dict) -> str:
                     ]
                 )
 
-                source = sources_by_name.get(
-                    definition_name
+                source = (
+                    sources_by_name.get(
+                        definition_name
+                    )
                 )
 
                 lines.append(
@@ -214,6 +480,12 @@ def build_mapping_context(mapping: dict) -> str:
                         )
                     )
 
+                    owner_name = (
+                        source.get(
+                            "owner_name"
+                        )
+                    )
+
                     if database_type:
                         lines.append(
                             "  database_type: "
@@ -224,6 +496,12 @@ def build_mapping_context(mapping: dict) -> str:
                         lines.append(
                             "  database_name: "
                             f"{database_name}"
+                        )
+
+                    if owner_name:
+                        lines.append(
+                            "  owner_name: "
+                            f"{owner_name}"
                         )
 
         transformations = (
@@ -240,8 +518,10 @@ def build_mapping_context(mapping: dict) -> str:
             )
 
             for transformation in transformations:
-                name = transformation.get(
-                    "name"
+                name = (
+                    transformation.get(
+                        "name"
+                    )
                 )
 
                 transformation_type = (
@@ -258,68 +538,23 @@ def build_mapping_context(mapping: dict) -> str:
                     f"{transformation_type}"
                 )
 
-                fields = transformation.get(
-                    "fields",
-                    [],
+                fields = (
+                    transformation.get(
+                        "fields",
+                        [],
+                    )
                 )
 
-                for field in fields:
-                    expression = field.get(
-                        "expression"
-                    )
-
-                    port_type = field.get(
-                        "port_type"
-                    )
-
-                    if (
-                        not expression
-                        and not port_type
-                    ):
-                        continue
-
-                    field_name = field.get(
-                        "name"
-                    )
-
-                    datatype = field.get(
-                        "datatype"
-                    )
-
-                    field_line = (
-                        f"  - {field_name}"
-                    )
-
-                    if datatype:
-                        field_line += (
-                            " | datatype: "
-                            f"{datatype}"
-                        )
-
-                    if port_type:
-                        field_line += (
-                            " | port_type: "
-                            f"{port_type}"
-                        )
-
-                    lines.append(
-                        field_line
-                    )
-
-                    if (
-                        expression
-                        and field_name
-                        and expression.strip()
-                        != field_name.strip()
-                    ):
-                        lines.append(
-                            "    expression: "
-                            f"{expression}"
-                        )
+                append_transformation_fields(
+                    lines=lines,
+                    fields=fields,
+                )
 
         if target_endpoints:
             lines.append("")
-            lines.append("TARGETS:")
+            lines.append(
+                "TARGETS:"
+            )
 
             for definition_name in sorted(
                 target_endpoints
@@ -330,8 +565,10 @@ def build_mapping_context(mapping: dict) -> str:
                     ]
                 )
 
-                target = targets_by_name.get(
-                    definition_name
+                target = (
+                    targets_by_name.get(
+                        definition_name
+                    )
                 )
 
                 lines.append(
@@ -357,38 +594,85 @@ def build_mapping_context(mapping: dict) -> str:
                             f"{database_type}"
                         )
 
+                    append_flat_file_config(
+                        lines=lines,
+                        title=(
+                            "target_definition_flat_file"
+                        ),
+                        config=target.get(
+                            "flat_file"
+                        ),
+                    )
+
+                    append_flat_file_config(
+                        lines=lines,
+                        title=(
+                            "session_flat_file_override"
+                        ),
+                        config=target.get(
+                            "session_flat_file"
+                        ),
+                    )
+
+                    append_flat_file_config(
+                        lines=lines,
+                        title=(
+                            "effective_flat_file"
+                        ),
+                        config=target.get(
+                            "effective_flat_file"
+                        ),
+                    )
+
         if data_flow:
             lines.append("")
-            lines.append("DATA FLOW:")
+            lines.append(
+                "DATA FLOW:"
+            )
 
             for connection in data_flow:
-                from_node = connection.get(
-                    "from",
-                    {},
+                from_node = (
+                    connection.get(
+                        "from",
+                        {},
+                    )
                 )
 
-                to_node = connection.get(
-                    "to",
-                    {},
+                to_node = (
+                    connection.get(
+                        "to",
+                        {},
+                    )
                 )
 
-                from_name = from_node.get(
-                    "name"
+                from_name = (
+                    from_node.get(
+                        "name"
+                    )
                 )
 
-                from_type = from_node.get(
-                    "type"
+                from_type = (
+                    from_node.get(
+                        "type"
+                    )
                 )
 
-                to_name = to_node.get(
-                    "name"
+                to_name = (
+                    to_node.get(
+                        "name"
+                    )
                 )
 
-                to_type = to_node.get(
-                    "type"
+                to_type = (
+                    to_node.get(
+                        "type"
+                    )
                 )
 
-                if from_name and to_name:
+                if (
+                    from_name
+                    and to_name
+                ):
                     lines.append(
                         f"- {from_name}"
                         f" [{from_type}]"
@@ -397,4 +681,6 @@ def build_mapping_context(mapping: dict) -> str:
                         f" [{to_type}]"
                     )
 
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )

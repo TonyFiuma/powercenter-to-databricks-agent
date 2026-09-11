@@ -83,13 +83,33 @@ def invoke_planner_with_retry(
 def build_documentation_context(
     retrieved_docs: list,
 ) -> str:
+    """
+    Build a bounded documentation context for the planner.
+
+    Each retrieved document includes both its content and the
+    most useful metadata so the planner can reference the
+    documentation during HUMAN_REVIEW suggestions.
+
+    To avoid exceeding the planner model token budget, the
+    documentation context is limited deterministically by:
+
+    - number of documents per source;
+    - maximum number of characters per document.
+
+    The parsed PowerCenter mapping is not truncated here.
+    Only retrieved documentation is bounded.
+    """
+
+    MAX_DOCUMENTS_PER_SOURCE = 3
+    MAX_DOCUMENT_CHARS = 2500
+
     powercenter_docs = []
     databricks_docs = []
 
     for document in retrieved_docs:
         source = document.metadata.get(
             "source",
-            ""
+            "",
         )
 
         if source == "databricks":
@@ -101,14 +121,85 @@ def build_documentation_context(
                 document
             )
 
+    def format_document(
+        document,
+    ) -> str:
+        """
+        Format one retrieved document while preserving
+        useful metadata and limiting its text size.
+        """
+
+        metadata = document.metadata
+
+        product = metadata.get(
+            "product",
+            "unknown",
+        )
+
+        version = metadata.get(
+            "version",
+            "unknown",
+        )
+
+        document_type = metadata.get(
+            "document_type",
+            "unknown",
+        )
+
+        page_number = metadata.get(
+            "page_number",
+            "unknown",
+        )
+
+        source = metadata.get(
+            "source",
+            "unknown",
+        )
+
+        content = (
+            document.page_content
+            or ""
+        )
+
+        content = content[
+            :MAX_DOCUMENT_CHARS
+        ]
+
+        return (
+            "DOCUMENT METADATA\n"
+            f"- product: {product}\n"
+            f"- version: {version}\n"
+            f"- document_type: {document_type}\n"
+            f"- page_number: {page_number}\n"
+            f"- source: {source}\n\n"
+            "DOCUMENT CONTENT\n"
+            f"{content}"
+        )
+
+    selected_powercenter_docs = (
+        powercenter_docs[
+            :MAX_DOCUMENTS_PER_SOURCE
+        ]
+    )
+
+    selected_databricks_docs = (
+        databricks_docs[
+            :MAX_DOCUMENTS_PER_SOURCE
+        ]
+    )
+
     powercenter_context = "\n\n".join(
-        document.page_content
-        for document in powercenter_docs
+        format_document(
+            document
+        )
+        for document in selected_powercenter_docs
     )
 
     databricks_context = "\n\n".join(
-        document.page_content
-        for document in databricks_docs
+        format_document(
+            document
+        )
+        for document in selected_databricks_docs
     )
 
     return (
@@ -159,9 +250,27 @@ For every statement in the migration plan, distinguish between:
    be preserved during migration.
 
 3. UNRESOLVED
-   Information that cannot be determined from the parsed mapping.
+   Information required for the migration that cannot be
+   determined with sufficient certainty.
 
-Do NOT convert UNRESOLVED information into implementation decisions.
+4. HUMAN_REVIEW_SUGGESTION
+   A possible migration approach that may help a human engineer
+   resolve an UNRESOLVED item.
+
+A HUMAN_REVIEW_SUGGESTION is NOT an approved implementation.
+
+It must:
+
+- remain clearly separated from FACT and MIGRATION REQUIREMENT
+- never be presented as certain
+- explain why human review is required
+- reference only relevant documentation actually present in the
+  documentation context
+- include a confidence level: LOW or MEDIUM
+- never silently convert an UNRESOLVED item into an implementation
+  decision
+
+The underlying item must remain UNRESOLVED until reviewed by a human.
 
 
 ==================================================
@@ -293,23 +402,29 @@ You MUST:
    unless the parsed mapping explicitly provides enough
    information to determine the variable lifecycle and usage.
 
-You MUST NOT invent implementations such as:
+4. If the available documentation provides enough evidence for
+   a reasonable migration approach, you MAY add a separate
+   HUMAN_REVIEW_SUGGESTION.
 
-- collect()
-- first()
-- last()
-- agg()
-- accumulator
-- Spark configuration
-- notebook widgets
-- job parameters
-- global Python variables
-- Delta tables
-- temporary files
+The HUMAN_REVIEW_SUGGESTION must never be presented as the final
+implementation.
 
-unless they are explicitly supported by the parsed mapping.
+Do NOT invent mapping-specific semantics such as:
 
-For unresolved SETVARIABLE migration semantics, write:
+- how many rows produce the variable value
+- which row wins when multiple rows are processed
+- how the variable is consumed downstream
+- whether the value must persist between runs
+- whether it is session-scoped or workflow-scoped
+- whether collect(), first(), last(), agg(), broadcast,
+  temporary views, widgets, job parameters, Python variables,
+  Spark configuration, Delta tables, or external storage are
+  semantically equivalent
+
+unless those facts are supported by the parsed mapping or the
+provided documentation.
+
+For unresolved SETVARIABLE migration semantics, keep:
 
 Databricks implementation:
 Not identified in parsed mapping.
@@ -318,6 +433,9 @@ Unresolved information:
 The lifecycle and downstream consumption of the PowerCenter
 mapping variable must be identified before choosing the
 Databricks implementation.
+
+If a reasonable documented approach exists, append a separate
+HUMAN_REVIEW_SUGGESTION section using the required format below.
 
 
 ==================================================
@@ -362,6 +480,7 @@ Do NOT mention examples such as:
 - cloud storage
 
 unless explicitly present in the parsed mapping.
+
 
 ==================================================
 DATA FLOW RULES
@@ -430,6 +549,21 @@ logic, configuration, behavior, or dependencies.
 
 Parsed mapping evidence always takes precedence over all
 documentation.
+
+Documentation metadata may be used to identify material that a human
+reviewer should inspect.
+
+When creating a HUMAN_REVIEW_SUGGESTION, cite the available metadata
+when present, for example:
+
+- product
+- version
+- document_type
+- page_number
+- source
+
+Do not invent a document title, page number, version, or source that
+is not present in the documentation context.
 
 
 ==================================================
@@ -525,6 +659,11 @@ Migration action:
 Unresolved information:
 - ...
 
+Human review suggestion:
+- Include this section only when a documented, reasonable migration
+  approach exists but human validation is still required.
+- Otherwise omit it.
+
 
 ==================================================
 TARGET PLAN
@@ -566,40 +705,61 @@ List only:
 
 - unresolved information explicitly visible from the mapping
 - migration requirements that cannot yet be implemented safely
+- HUMAN_REVIEW_SUGGESTION items that remain pending human approval
 
 Do not include speculative risks.
 
+A HUMAN_REVIEW_SUGGESTION must never be reported as a completed
+migration decision.
+
+
 ==================================================
-NO IMPLEMENTATION ALTERNATIVES FOR UNRESOLVED ITEMS
+HUMAN REVIEW SUGGESTIONS
 ==================================================
 
-When an implementation is classified as UNRESOLVED:
+When an implementation cannot be determined safely, keep the
+implementation classified as UNRESOLVED.
 
-- do not suggest possible solutions
-- do not provide examples of possible implementations
-- do not list alternative Databricks mechanisms
+However, when the available PowerCenter or Databricks documentation
+provides enough information to identify a reasonable migration
+approach, you MAY add a separate HUMAN_REVIEW_SUGGESTION.
 
-For example, for unresolved PowerCenter variable semantics,
-do NOT suggest:
+The suggestion must use this structure:
 
-- broadcast variables
-- temporary views
-- external storage
-- widgets
-- job parameters
-- Spark configuration
-- Python variables
-- Delta tables
+Human review suggestion:
+[HUMAN_REVIEW_SUGGESTION]
 
-Write only:
+Possible approach:
+<describe the possible Databricks approach>
 
-Databricks implementation:
-Not identified in parsed mapping.
+Why human review is required:
+<explain what information is still missing>
 
-Unresolved information:
-The lifecycle and downstream consumption of the PowerCenter
-mapping variable must be identified before choosing the
-Databricks implementation.
+Documentation to review:
+- Product: <metadata value if available>
+- Version: <metadata value if available>
+- Document type: <metadata value if available>
+- Page: <metadata value if available>
+- Source: <metadata value if available>
+
+Confidence:
+LOW or MEDIUM
+
+Suggested PySpark / Python:
+<optional conceptual code>
+
+Rules for suggested code:
+
+- Suggested code is NOT approved migration code.
+- Suggested code is for human review only.
+- Suggested code must not contain invented configuration values.
+- Suggested code must not invent mapping-specific behavior.
+- Suggested code must not be treated as executable migration output.
+- The final PySpark generator will be responsible for rendering
+  HUMAN_REVIEW_SUGGESTION code as comments only.
+- The underlying migration action must remain UNRESOLVED.
+- If there is not enough evidence even for a reasonable suggestion,
+  do not create a HUMAN_REVIEW_SUGGESTION.
 
 
 ==================================================
@@ -621,6 +781,7 @@ simply state what was identified.
 Absence of evidence is UNRESOLVED only when that missing
 information is required for the migration.
 
+
 ==================================================
 FINAL SELF-CHECK
 ==================================================
@@ -636,9 +797,13 @@ Before producing the answer, verify:
 - Did I invent collect/first/last/agg logic?
 - Did I infer downstream usage not shown in DATA FLOW?
 - Did I treat documentation capabilities as actual mapping logic?
+- Did I present a HUMAN_REVIEW_SUGGESTION as a confirmed solution?
+- Did I create suggested code without keeping the implementation
+  UNRESOLVED?
+- Did I invent documentation metadata or references?
 
 If the answer to any question is YES,
-remove that statement before returning the migration plan.
+remove or correct that statement before returning the migration plan.
 """
 
 

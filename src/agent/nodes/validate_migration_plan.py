@@ -10,7 +10,6 @@ def validate_migration_plan_node(
     """
     Validate migration plans before PySpark generation.
     """
-    print("\n>>> MIGRATION PLAN VALIDATOR NODE EXECUTED <<<")
     
     migration_plans = state.get(
         "migration_plans",
@@ -57,9 +56,12 @@ def validate_migration_plan_node(
                     f"  - {violation}"
                 )
 
-    validation_passed = all(
-        result["passed"]
-        for result in validation_results
+    validation_passed = (
+        len(validation_results) > 0
+        and all(
+            result["passed"]
+            for result in validation_results
+        )
     )
 
     print(

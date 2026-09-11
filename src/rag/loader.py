@@ -6,10 +6,10 @@ from langchain_unstructured import UnstructuredLoader
 
 def load_powercenter_docs(pdf_path: str) -> list:
     loader = UnstructuredLoader(
-    file_path=pdf_path,
-    strategy="fast"
+        file_path=pdf_path,
+        strategy="auto",
     )
-    
+
     return loader.load()
 
 

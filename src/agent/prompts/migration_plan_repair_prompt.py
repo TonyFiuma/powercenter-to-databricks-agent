@@ -4,10 +4,11 @@ def build_migration_plan_repair_prompt(
     violations: list[str],
 ) -> str:
     """
-    Build a focused repair prompt for one migration plan.
+    Build a compact repair prompt for one migration plan.
 
-    The repair LLM must correct validator violations without
-    introducing new assumptions or changing valid mapping facts.
+    The repair LLM must fix validator violations while
+    preserving valid facts, requirements, unresolved items,
+    and safe HUMAN_REVIEW_SUGGESTION sections.
     """
 
     violations_text = "\n".join(
@@ -19,86 +20,161 @@ def build_migration_plan_repair_prompt(
 You are repairing ONE Informatica PowerCenter to Databricks
 migration plan.
 
-Your goal is NOT to redesign the plan.
-Your goal is to fix the validator violations while preserving
-all valid facts and migration requirements.
+Fix ONLY the validator violations listed below.
+
+Do not redesign the migration plan.
+
+The parsed PowerCenter mapping is the authoritative source
+for mapping-specific facts and behavior.
+
+Preserve valid:
+
+- FACT statements
+- MIGRATION REQUIREMENT statements
+- UNRESOLVED items
+- HUMAN_REVIEW_SUGGESTION sections
+
 
 ==================================================
-SOURCE OF TRUTH
+CORE REPAIR RULES
 ==================================================
 
-The parsed PowerCenter mapping is the authoritative source.
+1. Fix every validator violation.
 
-Do not add information that is not explicitly present in the
-parsed mapping.
+2. Do not invent mapping-specific behavior or configuration.
+
+3. Do not convert unsupported assumptions into FACT,
+   MIGRATION REQUIREMENT, Databricks equivalent, or
+   Migration action.
+
+4. When required implementation information is missing,
+   keep the item UNRESOLVED.
+
+5. Use exactly:
+
+Not identified in parsed mapping.
+
+when the implementation cannot be determined safely.
+
+6. Preserve exact PowerCenter expressions when present.
+
+7. Return the COMPLETE repaired migration plan.
+
 
 ==================================================
-STRICT REPAIR RULES
+DO NOT INVENT
 ==================================================
 
-1. Fix every validator violation listed below.
+Do not invent or confirm unsupported:
 
-2. Preserve valid FACT statements from the current plan.
+- CSV, JSON, Parquet, or other file formats
+- DBFS, ADLS, S3, or storage paths
+- delimiters or headers
+- write modes
+- compression or partitioning
+- JDBC URLs or credentials
+- filters
+- joins
+- aggregations
+- SQL overrides
+- variable lifecycle
+- variable scope
+- downstream usage
+- persistence behavior
+- workflow or session behavior
 
-3. Preserve valid MIGRATION REQUIREMENT statements.
 
-4. Do NOT invent:
-   - file formats
-   - CSV
-   - JSON
-   - Parquet
-   - DBFS
-   - ADLS
-   - S3
-   - storage paths
-   - delimiters
-   - headers
-   - write modes
-   - compression
-   - partitioning
-   - JDBC URLs
-   - credentials
-   - drivers
-   - filters
-   - joins
-   - aggregations
-   - SQL overrides
-   - variable lifecycle
-   - downstream usage
-   - session behavior
+==================================================
+FLAT FILE RULE
+==================================================
 
-5. A PowerCenter target identified only as "Flat File" does NOT
-   prove that the Databricks output format is CSV.
+A PowerCenter target identified only as "Flat File" does NOT
+prove that the Databricks output format is CSV.
 
-   If the exact file format or location is not present in the
-   parsed mapping, mark it as UNRESOLVED.
+If format, path, delimiter, header, write mode, or storage
+technology are not explicitly present in the parsed mapping:
 
-   Do not write examples such as:
-   - df.write.format("csv")
-   - DBFS
-   - ADLS
-   - S3
+- keep them UNRESOLVED
+- do not put them in approved migration logic
 
-6. If SETVARIABLE appears in the parsed mapping:
-   - preserve the exact original expression
-   - preserve the migration requirement
-   - do not invent a Databricks implementation
-   - mark implementation as unresolved unless its lifecycle and
-     downstream consumption are explicitly present
+Examples such as:
 
-7. When information required for implementation is unavailable,
-   use exactly:
+df.write.format("csv")
+DBFS
+ADLS
+S3
 
-   Not identified in parsed mapping.
+must not appear as confirmed migration implementation unless
+explicitly supported by the parsed mapping.
 
-8. Do not provide speculative implementation alternatives for
-   unresolved items.
 
-9. Return the COMPLETE repaired migration plan, not only the
-   changed section.
+==================================================
+SETVARIABLE RULE
+==================================================
 
-10. Return only the migration plan.
-    Do not add explanations before or after it.
+If SETVARIABLE appears:
+
+- preserve the exact original expression
+- preserve the migration requirement
+- keep the Databricks implementation UNRESOLVED unless
+  variable lifecycle, scope, downstream usage, and required
+  persistence are explicitly known
+
+Do NOT present Python variables, job parameters, widgets,
+Spark configuration, temporary views, Delta tables,
+collect(), first(), last(), aggregation, broadcast, or similar
+mechanisms as the confirmed equivalent of SETVARIABLE unless
+the mapping proves those semantics.
+
+Such approaches may exist only inside a valid
+HUMAN_REVIEW_SUGGESTION.
+
+
+==================================================
+HUMAN REVIEW RULE
+==================================================
+
+A HUMAN_REVIEW_SUGGESTION is NOT an approved implementation.
+
+If one exists, it must use this structure:
+
+Human review suggestion:
+[HUMAN_REVIEW_SUGGESTION]
+
+Possible approach:
+<possible approach>
+
+Why human review is required:
+<missing evidence or semantic uncertainty>
+
+Documentation to review:
+<only references already present in the current plan>
+
+Confidence:
+LOW
+
+or:
+
+Confidence:
+MEDIUM
+
+Suggested PySpark / Python:
+<optional conceptual code>
+
+Rules:
+
+- the marker [HUMAN_REVIEW_SUGGESTION] is mandatory
+- Confidence must be exactly LOW or MEDIUM
+- the underlying migration item must remain UNRESOLVED
+- suggested code is not approved migration code
+- do not move suggestion content into Migration action
+- do not move suggestion content into Databricks equivalent
+- do not invent new documentation references
+- do not invent new migration alternatives
+
+If an existing suggestion cannot be repaired safely,
+remove the suggestion and keep the item UNRESOLVED.
+
 
 ==================================================
 PARSED MAPPING
@@ -106,11 +182,13 @@ PARSED MAPPING
 
 {mapping_context}
 
+
 ==================================================
 CURRENT MIGRATION PLAN
 ==================================================
 
 {current_plan}
+
 
 ==================================================
 VALIDATOR VIOLATIONS
@@ -118,19 +196,21 @@ VALIDATOR VIOLATIONS
 
 {violations_text}
 
+
 ==================================================
 FINAL CHECK
 ==================================================
 
-Before returning the repaired plan, verify:
+Before returning:
 
-- Did I remove every unsupported CSV assumption?
-- Did I remove every unsupported storage-location assumption?
-- Did I preserve mapping facts?
-- Did I preserve required PowerCenter expressions?
-- Did I avoid inventing implementation details?
-- Did I mark unresolved information as unresolved?
+- every validator violation must be fixed
+- unsupported CSV/storage assumptions must be removed
+- SETVARIABLE implementation must remain unresolved unless proven
+- every Human Review suggestion must contain the exact marker
+- Confidence must be exactly LOW or MEDIUM
+- suggested code must remain non-approved
+- no valid mapping facts may be lost
 
-If any validator violation is still present, repair it before
-returning the final plan.
+Return ONLY the complete repaired migration plan.
+Do not add explanations or markdown fences.
 """.strip()
