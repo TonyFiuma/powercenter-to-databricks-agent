@@ -174,7 +174,7 @@ def validate_human_review_suggestions(
             )
         else:
             confidence_match = re.search(
-                r"confidence:\s*"
+                r"\**confidence:\**\s*"
                 r"(low|medium)\b",
                 suggestion,
                 flags=re.IGNORECASE,

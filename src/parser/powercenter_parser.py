@@ -7,7 +7,10 @@ the main repository, folder, source, target, session and mapping information.
 
 import xml.etree.ElementTree as ET
 
-from parser.mapping_parser import parse_mappings
+from parser.mapping_parser import (
+    parse_mappings,
+    parse_mapplets,
+)
 
 
 def parse_flat_file_config(element) -> dict | None:
@@ -322,7 +325,6 @@ def enrich_mappings_with_io_metadata(
 
     return mappings
 
-
 def parse_powercenter_xml(
     file_path: str,
 ) -> dict:
@@ -374,6 +376,10 @@ def parse_powercenter_xml(
         folder
     )
 
+    mapplets = parse_mapplets(
+        folder
+    )
+
     session_overrides = (
         parse_session_target_overrides(
             folder
@@ -419,6 +425,8 @@ def parse_powercenter_xml(
         ),
 
         "mappings": mappings,
+
+        "mapplets": mapplets,
     }
 
     return result
