@@ -962,10 +962,12 @@ def validate_generated_code_node(
     state: AgentState,
 ) -> dict:
     """
-    Validate the generated PySpark for every parsed PowerCenter mapping.
+    Validate the generated PySpark for the PowerCenter
+    mapping selected in the current agent execution.
 
-    The result shape is intentionally compatible with the repair node:
-    each mapping result contains mapping_name, passed, and violations.
+    The result shape is intentionally compatible with
+    the repair node: each mapping result contains
+    mapping_name, passed, and violations.
     """
 
     print(
@@ -973,6 +975,10 @@ def validate_generated_code_node(
     )
 
     mapping = state["mapping"]
+
+    powercenter_project = state[
+        "powercenter_project"
+    ]
 
     generated_codes = state.get(
         "generated_codes",
@@ -983,11 +989,11 @@ def validate_generated_code_node(
         "migration_plans",
         {},
     )
-    
-    pc_mappings = mapping.get(
-        "mappings",
-        [],
-    )
+
+    # The graph processes one selected mapping.
+    pc_mappings = [
+        mapping
+    ]
 
     print(
         f"Mappings to validate: "
@@ -1006,6 +1012,7 @@ def validate_generated_code_node(
         )
 
         print("")
+
         print(
             f"[{index}/{len(pc_mappings)}] "
             f"Validating: {mapping_name}"
@@ -1016,9 +1023,10 @@ def validate_generated_code_node(
         )
 
         migration_plan = migration_plans.get(
-           mapping_name,
+            mapping_name,
             "",
         )
+
         if (
             not isinstance(code, str)
             or not code.strip()
@@ -1031,16 +1039,16 @@ def validate_generated_code_node(
         else:
             single_mapping = (
                 build_single_mapping_input(
-                    full_mapping=mapping,
+                    full_mapping=powercenter_project,
                     pc_mapping=pc_mapping,
                 )
             )
 
             violations = (
                 validate_mapping_code(
-                code=code,
-                single_mapping=single_mapping,
-                migration_plan=migration_plan,
+                    code=code,
+                    single_mapping=single_mapping,
+                    migration_plan=migration_plan,
                 )
             )
 
@@ -1058,6 +1066,7 @@ def validate_generated_code_node(
             print(
                 "Validation passed."
             )
+
         else:
             print(
                 "Validation failed."
@@ -1068,15 +1077,18 @@ def validate_generated_code_node(
                     f"  - {violation}"
                 )
 
-        validation_passed = (
-            len(validation_results) > 0
-            and all(
-                result["passed"]
-                for result in validation_results
-            )
+    # Calculate the overall result after all mappings
+    # have been validated.
+    validation_passed = (
+        len(validation_results) > 0
+        and all(
+            result["passed"]
+            for result in validation_results
         )
+    )
 
     print("")
+
     print(
         "Overall validation: "
         + (

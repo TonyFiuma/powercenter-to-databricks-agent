@@ -25,15 +25,18 @@ from src.storage.generated_code_store import (
 )
 
 
-
 def generate_pyspark_node(
     state: AgentState,
 ) -> dict:
     """
-    Generate PySpark code for every PowerCenter mapping.
+    Generate PySpark code for the PowerCenter mapping
+    selected in the current agent execution.
+
+    The complete PowerCenter project is used only to
+    rebuild the context required by the generator.
 
     Generated code is persisted after every successful
-    mapping so the process can resume after failures
+    generation so the process can resume after failures
     or rate limits.
 
     Empty or anomalous LLM responses are never cached.
@@ -55,6 +58,10 @@ def generate_pyspark_node(
         "mapping"
     )
 
+    powercenter_project = state.get(
+        "powercenter_project"
+    )
+
     migration_plans = state.get(
         "migration_plans",
         {},
@@ -67,7 +74,14 @@ def generate_pyspark_node(
 
     if not mapping:
         raise ValueError(
-            "Parsed mapping not found in agent state."
+            "Selected PowerCenter mapping not found "
+            "in agent state."
+        )
+
+    if not powercenter_project:
+        raise ValueError(
+            "Complete PowerCenter project not found "
+            "in agent state."
         )
 
     if not migration_plans:
@@ -76,19 +90,12 @@ def generate_pyspark_node(
         )
 
     # ==================================================
-    # Get PowerCenter mappings
+    # Current mapping
     # ==================================================
 
-    mappings = mapping.get(
-        "mappings",
-        [],
-    )
-
-    if not mappings:
-        raise ValueError(
-            "No mappings found in parsed "
-            "PowerCenter XML."
-        )
+    mappings = [
+        mapping
+    ]
 
     print(
         f"Mappings to generate: "
@@ -118,11 +125,10 @@ def generate_pyspark_node(
         )
 
         if not mapping_name:
-            print(
-                f"\n[{index}/{len(mappings)}] "
-                "Skipping mapping without name."
+            raise ValueError(
+                "Selected PowerCenter mapping "
+                "does not have a name."
             )
-            continue
 
         print(
             f"\n[{index}/{len(mappings)}] "
@@ -139,17 +145,30 @@ def generate_pyspark_node(
                 mapping_name
             ]
 
-            print(
-                "Generated PySpark found "
-                "in cache."
-            )
+            if is_usable_generated_code(
+                cached_code
+            ):
+                print(
+                    "Generated PySpark found "
+                    "in cache."
+                )
+
+                print(
+                    "Cached PySpark characters: "
+                    f"{len(cached_code)}"
+                )
+
+                continue
 
             print(
-                "Cached PySpark characters: "
-                f"{len(cached_code)}"
+                "Cached PySpark is unusable. "
+                "Regenerating."
             )
 
-            continue
+            generated_codes.pop(
+                mapping_name,
+                None,
+            )
 
         # ==============================================
         # Migration plan
@@ -178,7 +197,7 @@ def generate_pyspark_node(
 
         single_mapping = (
             build_single_mapping_input(
-                full_mapping=mapping,
+                full_mapping=powercenter_project,
                 pc_mapping=pc_mapping,
             )
         )
@@ -261,6 +280,7 @@ def generate_pyspark_node(
             traceback.print_exc()
 
             raise
+
         # ==============================================
         # Extract generated code
         # ==============================================
@@ -346,7 +366,10 @@ def generate_pyspark_node(
         )
 
         if not pyspark_code:
-            continue
+            raise ValueError(
+                "Generated PySpark code missing for "
+                f"mapping: {mapping_name}"
+            )
 
         combined_sections.append(
             (
@@ -376,13 +399,11 @@ def generate_pyspark_node(
         f"{len(generated_codes)}"
     )
 
-    for mapping_name, code in (
-        generated_codes.items()
-    ):
-        print(
-            f"- {mapping_name}: "
-            f"{len(code)} characters"
-        )
+    print(
+        f"- {mapping['name']}: "
+        f"{len(generated_codes[mapping['name']])} "
+        "characters"
+    )
 
     # ==================================================
     # Update LangGraph state

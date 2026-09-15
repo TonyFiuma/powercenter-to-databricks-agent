@@ -9,6 +9,11 @@ UNSUPPORTED_SOURCE_QUALIFIER_ATTRIBUTES = (
     "Post SQL",
 )
 
+UNSUPPORTED_TARGET_INSTANCE_ATTRIBUTES = (
+    "Pre SQL",
+    "Post SQL",
+)
+
 
 @dataclass(frozen=True)
 class MappingValidationIssue:
@@ -94,6 +99,60 @@ def validate_source_qualifier(
     return issues
 
 
+def validate_target_instance(
+    instance: dict[str, Any],
+) -> list[MappingValidationIssue]:
+    """
+    Detect Target instance attributes whose
+    semantics are not currently migrated by the
+    deterministic transpiler.
+
+    Target Pre SQL and Post SQL may contain
+    executable PowerCenter logic that must not
+    be silently discarded.
+
+    Empty attributes are ignored.
+    """
+
+    issues: list[MappingValidationIssue] = []
+
+    table_attributes = instance.get(
+        "table_attributes",
+        {},
+    )
+
+    for feature in (
+        UNSUPPORTED_TARGET_INSTANCE_ATTRIBUTES
+    ):
+        value = table_attributes.get(feature)
+
+        if value is None:
+            continue
+
+        if not str(value).strip():
+            continue
+
+        issues.append(
+            MappingValidationIssue(
+                transformation_name=(
+                    instance.get("name")
+                    or "<unknown>"
+                ),
+                category="unsupported_feature",
+                feature=feature,
+                message=(
+                    "Target instance feature "
+                    f"'{feature}' is populated "
+                    "but is not currently migrated "
+                    "by the deterministic transpiler."
+                ),
+                severity="error",
+            )
+        )
+
+    return issues
+
+
 def validate_powercenter_mapping(
     mapping: dict[str, Any],
 ) -> MappingValidationResult:
@@ -115,6 +174,17 @@ def validate_powercenter_mapping(
             issues.extend(
                 validate_source_qualifier(
                     transformation
+                )
+            )
+
+    for instance in mapping.get(
+        "instances",
+        [],
+    ):
+        if instance.get("type") == "TARGET":
+            issues.extend(
+                validate_target_instance(
+                    instance
                 )
             )
 

@@ -59,9 +59,15 @@ def retrieve_docs_node(
         load_databricks_vectorstore()
     )
 
+    mapplets = state.get(
+    "mapplets",
+    [],
+)
+
     transformation_types = (
         extract_transformation_types(
-            mapping
+            mapping=mapping,
+            mapplets=mapplets,
         )
     )
 

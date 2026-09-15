@@ -187,15 +187,21 @@ def build_migration_report_node(
         exist_ok=True,
     )
 
+    # state["mapping"] contains the single mapping
+    # selected by parse_mapping_node.
     mapping = state.get(
-        "mapping",
-        {},
+        "mapping"
     )
 
-    pc_mappings = mapping.get(
-        "mappings",
-        [],
-    )
+    if not mapping:
+        raise ValueError(
+            "Selected PowerCenter mapping not found "
+            "in agent state."
+        )
+
+    pc_mappings = [
+        mapping
+    ]
 
     migration_plans = state.get(
         "migration_plans",

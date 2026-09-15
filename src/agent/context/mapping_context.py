@@ -1,3 +1,4 @@
+
 def build_single_mapping_input(
     full_mapping: dict,
     pc_mapping: dict,
@@ -6,28 +7,25 @@ def build_single_mapping_input(
     Create a reduced PowerCenter structure containing
     only one mapping.
 
-    Prefer mapping-specific enriched source and target metadata
-    when available, because they include runtime/session information
-    such as target Flat File overrides.
+    Prefer mapping-specific enriched source and target
+    metadata when available because they may contain
+    runtime/session information.
 
-    Fall back to global Source/Target Definitions when mapping-level
-    metadata is not available.
+    Fall back to global Source/Target Definitions when
+    mapping-level metadata is not available.
     """
 
     return {
         "repository": full_mapping.get("repository"),
         "folder": full_mapping.get("folder"),
-
         "sources": (
             pc_mapping.get("sources")
             or full_mapping.get("sources", [])
         ),
-
         "targets": (
             pc_mapping.get("targets")
             or full_mapping.get("targets", [])
         ),
-
         "mappings": [pc_mapping],
     }
 
@@ -36,8 +34,8 @@ def build_instance_lookup(
     pc_mapping: dict,
 ) -> dict:
     """
-    Build a lookup that maps PowerCenter instance names
-    to their instance metadata.
+    Build a lookup from PowerCenter instance name
+    to instance metadata.
     """
 
     return {
@@ -55,7 +53,7 @@ def resolve_definition_name(
     instance_lookup: dict,
 ) -> str | None:
     """
-    Resolve a data-flow instance name to the underlying
+    Resolve a data-flow instance name to its underlying
     PowerCenter definition name.
     """
 
@@ -88,7 +86,7 @@ def collect_mapping_endpoints(
 
     Returns:
         tuple[dict, dict]:
-            Source and target dictionaries in the form:
+            Source and target dictionaries:
 
             {
                 definition_name: instance_name
@@ -144,10 +142,10 @@ def append_flat_file_config(
     config: dict | None,
 ) -> None:
     """
-    Append Flat File configuration to the mapping context.
+    Append Flat File configuration to the context.
 
-    Only properties explicitly parsed from the PowerCenter
-    XML are included.
+    Only properties explicitly parsed from PowerCenter
+    are included.
     """
 
     if not config:
@@ -201,22 +199,68 @@ def append_flat_file_config(
             )
 
 
+def append_instance_table_attributes(
+    lines: list,
+    instance: dict | None,
+) -> None:
+    """
+    Append populated instance-level TABLEATTRIBUTE
+    values.
+
+    These attributes may contain migration-relevant
+    runtime semantics such as Target Pre SQL and
+    Post SQL.
+    """
+
+    if not instance:
+        return
+
+    table_attributes = (
+        instance.get(
+            "table_attributes",
+            {},
+        )
+    )
+
+    if not table_attributes:
+        return
+
+    populated_attributes = {
+        key: value
+        for key, value
+        in table_attributes.items()
+        if value is not None
+        and str(value).strip()
+    }
+
+    if not populated_attributes:
+        return
+
+    lines.append(
+        "  instance_table_attributes:"
+    )
+
+    for key, value in (
+        populated_attributes.items()
+    ):
+        lines.append(
+            f"    {key}: {value}"
+        )
+
+
 def append_transformation_fields(
     lines: list,
     fields: list,
 ) -> None:
     """
-    Append transformation fields in a compact form.
+    Append transformation fields in compact form.
 
-    Pass-through INPUT/OUTPUT fields are grouped into a
-    single line to reduce prompt size.
+    Pass-through INPUT/OUTPUT fields are grouped into
+    one line.
 
-    Fields with non-trivial expressions are preserved
-    individually with their full expression because they
-    are migration-relevant.
-
-    Other ports, such as INPUT-only or OUTPUT-only fields,
-    are also retained.
+    Fields containing non-trivial expressions are
+    preserved individually with their complete
+    expression.
     """
 
     passthrough_fields = []
@@ -340,22 +384,25 @@ def build_mapping_context(
     mapping: dict,
 ) -> str:
     """
-    Build a compact migration-relevant context from the parsed
-    PowerCenter structure.
+    Build a compact migration-relevant context from
+    the parsed PowerCenter structure.
 
-    The context explicitly distinguishes:
+    The context includes:
 
-    - instance name;
-    - underlying Source/Target Definition;
+    - repository and folder;
+    - source instances and definitions;
     - source database metadata;
-    - transformation behavior;
-    - target definition configuration;
-    - session-level target overrides;
-    - effective target runtime configuration;
+    - transformations and expressions;
+    - target instances and definitions;
+    - target instance TABLEATTRIBUTE values;
+    - target configuration;
     - mapping data flow.
 
-    Pass-through transformation fields are grouped to reduce
-    prompt size while preserving migration-relevant expressions.
+    Instance-level TABLEATTRIBUTE metadata is
+    particularly important because PowerCenter may
+    store runtime semantics such as Target Pre SQL
+    and Post SQL on the mapping instance rather than
+    on the Target Definition.
     """
 
     lines = []
@@ -436,6 +483,10 @@ def build_mapping_context(
             instance_lookup,
         )
 
+        # -----------------------------------------
+        # Sources
+        # -----------------------------------------
+
         if source_endpoints:
             lines.append("")
             lines.append(
@@ -504,6 +555,10 @@ def build_mapping_context(
                             f"{owner_name}"
                         )
 
+        # -----------------------------------------
+        # Transformations
+        # -----------------------------------------
+
         transformations = (
             pc_mapping.get(
                 "transformations",
@@ -550,6 +605,10 @@ def build_mapping_context(
                     fields=fields,
                 )
 
+        # -----------------------------------------
+        # Targets
+        # -----------------------------------------
+
         if target_endpoints:
             lines.append("")
             lines.append(
@@ -571,6 +630,12 @@ def build_mapping_context(
                     )
                 )
 
+                target_instance = (
+                    instance_lookup.get(
+                        instance_name
+                    )
+                )
+
                 lines.append(
                     f"- instance: "
                     f"{instance_name}"
@@ -579,6 +644,14 @@ def build_mapping_context(
                 lines.append(
                     f"  definition: "
                     f"{definition_name}"
+                )
+
+                # Important:
+                # Pre SQL / Post SQL can live on the
+                # TARGET instance.
+                append_instance_table_attributes(
+                    lines=lines,
+                    instance=target_instance,
                 )
 
                 if target:
@@ -623,6 +696,10 @@ def build_mapping_context(
                             "effective_flat_file"
                         ),
                     )
+
+        # -----------------------------------------
+        # Data flow
+        # -----------------------------------------
 
         if data_flow:
             lines.append("")

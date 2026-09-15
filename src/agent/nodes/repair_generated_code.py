@@ -197,8 +197,12 @@ def repair_generated_code_node(
         "xml_path"
     )
 
-    full_mapping = state.get(
+    mapping = state.get(
         "mapping"
+    )
+
+    powercenter_project = state.get(
+        "powercenter_project"
     )
 
     generated_codes = dict(
@@ -228,9 +232,16 @@ def repair_generated_code_node(
             "XML path not found in agent state."
         )
 
-    if not full_mapping:
+    if not mapping:
         raise ValueError(
-            "Parsed mapping not found in agent state."
+            "Selected PowerCenter mapping not found "
+            "in agent state."
+        )
+
+    if not powercenter_project:
+        raise ValueError(
+            "Complete PowerCenter project not found "
+            "in agent state."
         )
 
     failed_results = [
@@ -257,10 +268,9 @@ def repair_generated_code_node(
             ),
         }
 
-    mappings = full_mapping.get(
-        "mappings",
-        [],
-    )
+    mappings = [
+        mapping
+    ]
 
     mappings_by_name = {
         mapping.get("name"): mapping
@@ -346,7 +356,7 @@ def repair_generated_code_node(
 
         single_mapping = (
             build_single_mapping_input(
-                full_mapping=full_mapping,
+                full_mapping=powercenter_project,
                 pc_mapping=pc_mapping,
             )
         )
@@ -417,6 +427,26 @@ def repair_generated_code_node(
             # destroying the previous generation.
             continue
 
+            repaired_code = response.content
+
+        if not isinstance(
+            repaired_code,
+            str,
+        ):
+            repaired_code = str(
+                repaired_code
+            )
+
+        repaired_code = repaired_code.strip()
+
+        print(
+            "PySpark repair response received."
+        )
+
+        print(
+            "Raw repaired PySpark characters: "
+            f"{len(repaired_code)}"
+        )
         # ----------------------------------------------------
         # HUMAN REVIEW deterministic safety enforcement
         # ----------------------------------------------------

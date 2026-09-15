@@ -36,7 +36,7 @@ class AgentState(TypedDict, total=False):
     powercenter_sql: str
     databricks_sql: str
 
-    # Validation
+    # Deterministic validation
     mapping_validation: Any
     sql_validation: Any
     migration_validation: Any
@@ -49,10 +49,13 @@ class AgentState(TypedDict, total=False):
     retrieved_docs: list[Any]
 
     # AI migration fallback
+    migration_plans: dict[str, str]
     migration_plan: str
+    generated_codes: dict[str, str]
     pyspark_code: str
 
     # Migration-plan validation / repair
+    migration_plan_validation_results: list[dict[str, Any]]
     migration_plan_validation_passed: bool
     migration_plan_repair_attempts: int
 

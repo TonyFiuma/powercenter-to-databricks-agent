@@ -25,8 +25,8 @@ def invoke_repair_llm_with_retry(
     prompt: str,
 ):
     """
-    Invoke the planner LLM with retry handling for Groq
-    rate-limit errors.
+    Invoke the planner LLM with retry handling
+    for Groq rate-limit errors.
     """
 
     for attempt in range(
@@ -70,10 +70,27 @@ def repair_migration_plan_node(
     state: AgentState,
 ) -> dict:
     """
-    Repair only migration plans that failed deterministic
+    Repair migration plans that failed deterministic
     validation.
 
-    Repaired plans are persisted immediately in the existing
+    The current AgentState contains:
+
+    - mapping:
+        the single PowerCenter mapping selected
+        for the current graph execution;
+
+    - powercenter_project:
+        the complete parsed PowerCenter project;
+
+    - migration_plans:
+        migration plans indexed by mapping name;
+
+    - migration_plan_validation_results:
+        deterministic validation results.
+
+    Only failed plans are sent to the repair LLM.
+
+    Repaired plans are persisted immediately in the
     migration-plan cache.
     """
 
@@ -82,6 +99,11 @@ def repair_migration_plan_node(
     )
 
     mapping = state["mapping"]
+
+    powercenter_project = state[
+        "powercenter_project"
+    ]
+
     xml_path = state["xml_path"]
 
     migration_plans = dict(
@@ -110,25 +132,23 @@ def repair_migration_plan_node(
         f"{len(failed_results)}"
     )
 
+    # A failed validation with no failed result is an
+    # inconsistent graph state. There is nothing that
+    # the repair node can safely repair.
     if not failed_results:
-        return {
-            "migration_plans": migration_plans,
-            "migration_plan": state.get(
-                "migration_plan",
-                "",
-            ),
-            "migration_plan_repair_attempts": (
-                state.get(
-                    "migration_plan_repair_attempts",
-                    0,
-                )
-            ),
-        }
+        raise RuntimeError(
+            "Migration plan validation failed, but no "
+            "failed migration plans were provided to "
+            "the repair node. The graph cannot "
+            "continue safely."
+        )
 
-    pc_mappings = mapping.get(
-        "mappings",
-        [],
-    )
+    # The graph processes exactly one selected mapping.
+    # Keep a list here for compatibility with the
+    # existing repair logic and combined-plan handling.
+    pc_mappings = [
+        mapping
+    ]
 
     mapping_by_name = {
         pc_mapping.get(
@@ -138,6 +158,9 @@ def repair_migration_plan_node(
         for pc_mapping in pc_mappings
     }
 
+    # Lazy initialization:
+    # instantiate the LLM only when there is actually
+    # something to repair.
     llm = get_planner_llm()
 
     for index, result in enumerate(
@@ -178,7 +201,7 @@ def repair_migration_plan_node(
         if pc_mapping is None:
             raise ValueError(
                 "Parsed mapping not found for "
-                f"migration-plan repair: "
+                "migration-plan repair: "
                 f"{mapping_name}"
             )
 
@@ -198,9 +221,15 @@ def repair_migration_plan_node(
                 f"repair: {mapping_name}"
             )
 
+        # Rebuild the structure expected by
+        # build_mapping_context().
+        #
+        # The full project provides repository/folder
+        # and global metadata, while pc_mapping is the
+        # single mapping being repaired.
         single_mapping = (
             build_single_mapping_input(
-                full_mapping=mapping,
+                full_mapping=powercenter_project,
                 pc_mapping=pc_mapping,
             )
         )
@@ -258,17 +287,19 @@ def repair_migration_plan_node(
             print(
                 "Repair returned an empty plan."
             )
+
             print(
                 "Keeping previous migration plan."
             )
+
             continue
 
         migration_plans[
             mapping_name
         ] = repaired_plan
 
-        # Persist immediately so a later failure does not
-        # lose already repaired migration plans.
+        # Persist immediately so a later failure does
+        # not lose an already repaired migration plan.
         save_migration_plans(
             source_xml=xml_path,
             migration_plans=migration_plans,
@@ -279,7 +310,10 @@ def repair_migration_plan_node(
             "saved to cache."
         )
 
-    # Rebuild the combined plan in original mapping order.
+    # Rebuild the combined plan in mapping order.
+    # The current graph executes one mapping, but this
+    # keeps the return contract compatible with the
+    # rest of the agent.
     ordered_plans = []
 
     for pc_mapping in pc_mappings:
@@ -293,7 +327,10 @@ def repair_migration_plan_node(
         )
 
         if (
-            not isinstance(plan, str)
+            not isinstance(
+                plan,
+                str,
+            )
             or not plan.strip()
         ):
             raise ValueError(
@@ -318,10 +355,12 @@ def repair_migration_plan_node(
     )
 
     print("")
+
     print(
         "Migration-plan repair round "
         "completed."
     )
+
     print(
         "Migration-plan repair attempts: "
         f"{repair_attempts}"

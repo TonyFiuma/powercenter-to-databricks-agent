@@ -18,8 +18,21 @@ from src.storage.migration_plan_store import (
     save_migration_plans,
 )
 
+from src.transpiler.databricks_runtime_variable import (
+    build_databricks_runtime_variables,
+)
+
+from src.transpiler.runtime_variable_resolver import (
+    resolve_mapping_runtime_variables,
+)
+
+
 MAX_LLM_RETRIES = 3
 RETRY_WAIT_SECONDS = 4
+
+# Increment this value whenever the information supplied
+# to the planner changes in a migration-relevant way.
+PLANNER_CONTEXT_VERSION = "v5"
 
 
 def invoke_planner_with_retry(
@@ -29,11 +42,8 @@ def invoke_planner_with_retry(
     Invoke the planner LLM with retry handling for
     temporary Groq token-per-minute rate limits.
 
-    Only Groq RateLimitError exceptions are retried.
-    All other failures are propagated immediately.
-
-    The planner LLM is initialized lazily so that
-    deterministic migrations do not initialize it.
+    The planner is initialized lazily so deterministic
+    migrations do not initialize an LLM unnecessarily.
     """
 
     llm = get_planner_llm()
@@ -86,20 +96,12 @@ def build_documentation_context(
     retrieved_docs: list,
 ) -> str:
     """
-    Build a bounded documentation context for the planner.
+    Build a bounded documentation context for the
+    planner.
 
-    Each retrieved document includes both its content and the
-    most useful metadata so the planner can reference the
-    documentation during HUMAN_REVIEW suggestions.
-
-    To avoid exceeding the planner model token budget, the
-    documentation context is limited deterministically by:
-
-    - number of documents per source;
-    - maximum number of characters per document.
-
-    The parsed PowerCenter mapping is not truncated here.
-    Only retrieved documentation is bounded.
+    Documentation is reference material only.
+    Parsed and deterministically resolved PowerCenter
+    facts remain the source of truth.
     """
 
     MAX_DOCUMENTS_PER_SOURCE = 3
@@ -126,11 +128,6 @@ def build_documentation_context(
     def format_document(
         document,
     ) -> str:
-        """
-        Format one retrieved document while preserving
-        useful metadata and limiting its text size.
-        """
-
         metadata = document.metadata
 
         product = metadata.get(
@@ -194,14 +191,16 @@ def build_documentation_context(
         format_document(
             document
         )
-        for document in selected_powercenter_docs
+        for document
+        in selected_powercenter_docs
     )
 
     databricks_context = "\n\n".join(
         format_document(
             document
         )
-        for document in selected_databricks_docs
+        for document
+        in selected_databricks_docs
     )
 
     return (
@@ -212,8 +211,107 @@ def build_documentation_context(
     )
 
 
+def build_runtime_context(
+    mapping: dict,
+    session: dict,
+    workflow: dict,
+) -> str:
+    """
+    Build deterministic runtime-variable facts for
+    the planner.
+
+    PowerCenter resolution and Databricks translation
+    are performed by the deterministic transpiler
+    components.
+
+    The LLM must consume these results as facts rather
+    than rediscovering variable semantics.
+    """
+
+    resolved_variables = (
+        resolve_mapping_runtime_variables(
+            mapping=mapping,
+            session=session,
+            workflow=workflow,
+        )
+    )
+
+    databricks_variables = (
+        build_databricks_runtime_variables(
+            mapping=mapping,
+            session=session,
+            workflow=workflow,
+        )
+    )
+
+    resolved_by_name = {
+        variable.source_name: variable
+        for variable in resolved_variables
+    }
+
+    databricks_by_name = {
+        variable.source_name: variable
+        for variable in databricks_variables
+    }
+
+    variable_names = sorted(
+        set(resolved_by_name)
+        | set(databricks_by_name)
+    )
+
+    if not variable_names:
+        return (
+            "No runtime variables identified "
+            "deterministically."
+        )
+
+    lines = []
+
+    for variable_name in variable_names:
+        resolved = resolved_by_name.get(
+            variable_name
+        )
+
+        databricks = databricks_by_name.get(
+            variable_name
+        )
+
+        lines.append(
+            f"- source_name: {variable_name}"
+        )
+
+        if resolved:
+            lines.append(
+                "  resolution_type: "
+                f"{resolved.resolution_type}"
+            )
+
+            lines.append(
+                "  resolved_powercenter_value: "
+                f"{resolved.resolved_value}"
+            )
+
+        if databricks:
+            lines.append(
+                "  databricks_variable_type: "
+                f"{databricks.variable_type}"
+            )
+
+            lines.append(
+                "  databricks_value: "
+                f"{databricks.value}"
+            )
+
+        lines.append("")
+
+    return "\n".join(
+        lines
+    ).strip()
+
+
 def build_prompt(
     mapping_context: str,
+    runtime_context: str,
     documentation_context: str,
 ) -> str:
     """
@@ -235,7 +333,8 @@ and create a migration plan for Databricks.
 
 Your priority is factual accuracy.
 
-The parsed PowerCenter mapping is the source of truth.
+The parsed PowerCenter mapping and deterministic runtime facts
+are the source of truth.
 
 
 ==================================================
@@ -245,7 +344,8 @@ EVIDENCE RULES
 For every statement in the migration plan, distinguish between:
 
 1. FACT
-   Information explicitly present in the parsed mapping.
+   Information explicitly present in the parsed mapping or
+   deterministic runtime facts.
 
 2. MIGRATION REQUIREMENT
    A requirement that follows directly from a FACT and must
@@ -273,6 +373,41 @@ It must:
   decision
 
 The underlying item must remain UNRESOLVED until reviewed by a human.
+
+
+==================================================
+DETERMINISTIC FACT RULE
+==================================================
+
+The DETERMINISTIC RUNTIME FACTS section is produced by
+deterministic code before the LLM is invoked.
+
+You MUST treat those values as FACT.
+
+Do NOT mark a runtime variable as UNRESOLVED when its
+resolution_type is "computed" or "external".
+
+When a deterministic Databricks value is provided, use that
+value as the migration requirement.
+
+Examples:
+
+- resolution_type: external
+  databricks_variable_type: parameter
+  databricks_value: DT_RIFERIMENTO
+
+  This means the PowerCenter variable is resolved as an
+  external runtime parameter named DT_RIFERIMENTO.
+
+- resolution_type: computed
+  databricks_variable_type: expression
+  databricks_value: current_timestamp()
+
+  This means the deterministic Databricks equivalent is
+  current_timestamp().
+
+Only variables explicitly classified as "unresolved" may be
+reported as unresolved runtime variables.
 
 
 ==================================================
@@ -317,10 +452,10 @@ Do NOT invent:
 Do NOT propose an implementation merely because it would be
 a common Databricks solution.
 
-If the parsed mapping does not contain enough information,
+If the available evidence does not contain enough information,
 write exactly:
 
-Not identified in parsed mapping.
+Not identified in available migration evidence.
 
 
 ==================================================
@@ -330,18 +465,8 @@ POWERCENTER INSTANCE RULE
 Source and target INSTANCE names may differ from their
 underlying DEFINITION names.
 
-Example:
-
-instance:
-    MY_SOURCE1
-
-definition:
-    MY_SOURCE
-
-This is normal PowerCenter behavior.
-
-Do NOT report a mismatch if the parsed mapping explicitly
-links the instance to the definition.
+Do NOT report a mismatch when the parsed mapping explicitly
+links the instance to its definition.
 
 
 ==================================================
@@ -355,12 +480,7 @@ For a Source Qualifier:
 - report a SQL override only if explicitly present
 - report DISTINCT only if explicitly present
 
-If none of those are present, state:
-
-No filter, join, SQL override, or DISTINCT logic identified
-in parsed mapping.
-
-Do NOT infer that the Source Qualifier performs additional logic.
+Do NOT infer additional Source Qualifier behavior.
 
 
 ==================================================
@@ -375,69 +495,54 @@ For an Expression transformation:
 - do not invent column derivations
 - do not infer downstream usage from port names
 
-If all ports are pass-through and no non-trivial expression
-is present, state:
 
-No non-trivial expression logic identified in parsed mapping.
+==================================================
+RUNTIME VARIABLE RULES
+==================================================
+
+Runtime-variable semantics may be supplied in the
+DETERMINISTIC RUNTIME FACTS section.
+
+Those facts take precedence over any uncertainty inferred
+from the mapping text alone.
+
+Do NOT claim that a variable lifecycle or runtime origin is
+unknown when the deterministic section explicitly resolves it.
+
+Do NOT replace deterministic parameter or expression values
+with speculative widgets, job parameters, Python variables,
+Spark configuration, Delta tables, or external storage.
 
 
 ==================================================
-SETVARIABLE RULES
+TARGET INSTANCE SQL RULES
 ==================================================
 
-If a PowerCenter expression contains SETVARIABLE:
+Target INSTANCE metadata may contain TABLEATTRIBUTE values
+such as:
 
-Example:
+- Pre SQL
+- Post SQL
 
-SETVARIABLE($$variable_name, expression)
+When populated, these values are FACTS from the PowerCenter
+mapping.
 
 You MUST:
 
-1. Report the exact PowerCenter expression.
+1. report the exact behavior represented by the populated
+   Target instance SQL;
 
-2. Identify the migration requirement:
+2. identify that its semantics must be preserved during
+   migration;
 
-   The value assigned to the PowerCenter mapping variable
-   must be preserved in the Databricks implementation.
+3. never state that Pre SQL or Post SQL is absent when a
+   populated instance_table_attributes value is present;
 
-3. Mark the final Databricks implementation as unresolved
-   unless the parsed mapping explicitly provides enough
-   information to determine the variable lifecycle and usage.
+4. keep the Databricks implementation UNRESOLVED if the
+   available evidence does not determine safely where or how
+   the SQL should execute.
 
-4. If the available documentation provides enough evidence for
-   a reasonable migration approach, you MAY add a separate
-   HUMAN_REVIEW_SUGGESTION.
-
-The HUMAN_REVIEW_SUGGESTION must never be presented as the final
-implementation.
-
-Do NOT invent mapping-specific semantics such as:
-
-- how many rows produce the variable value
-- which row wins when multiple rows are processed
-- how the variable is consumed downstream
-- whether the value must persist between runs
-- whether it is session-scoped or workflow-scoped
-- whether collect(), first(), last(), agg(), broadcast,
-  temporary views, widgets, job parameters, Python variables,
-  Spark configuration, Delta tables, or external storage are
-  semantically equivalent
-
-unless those facts are supported by the parsed mapping or the
-provided documentation.
-
-For unresolved SETVARIABLE migration semantics, keep:
-
-Databricks implementation:
-Not identified in parsed mapping.
-
-Unresolved information:
-The lifecycle and downstream consumption of the PowerCenter
-mapping variable must be identified before choosing the
-Databricks implementation.
-
-If a reasonable documented approach exists, append a separate
-HUMAN_REVIEW_SUGGESTION section using the required format below.
+Do not silently discard Target Pre SQL or Post SQL.
 
 
 ==================================================
@@ -447,41 +552,21 @@ TARGET RULES
 If the parsed mapping identifies the target as Flat File,
 you may state that a file-based Databricks output is required.
 
-However, DO NOT invent:
+Do NOT invent:
 
 - path
 - DBFS location
 - cloud storage location
 - delimiter
-- header=true
-- header=false
-- overwrite
-- append
+- header
+- write mode
 - partitioning
 - compression
 - file naming behavior
 
-Do NOT show example code containing guessed values.
-
-Bad example:
-
-df.write.mode("overwrite").option("header", "true").csv(...)
-
-Do not produce this.
-
-Instead state unresolved properties explicitly.
-
-Do NOT suggest example storage technologies or locations
-when the target location is unresolved.
-
-Do NOT mention examples such as:
-
-- DBFS
-- ADLS
-- S3
-- cloud storage
-
-unless explicitly present in the parsed mapping.
+For database targets, do not invent catalog, schema,
+connection, or write semantics that are not present in the
+available evidence.
 
 
 ==================================================
@@ -490,82 +575,41 @@ DATA FLOW RULES
 
 Represent only connections explicitly present in DATA FLOW.
 
-Do NOT infer that a transformation output port is unused
-simply because port-level connector metadata is not available.
-
 Do NOT infer additional upstream or downstream components.
 
 If port-level usage cannot be determined, state:
 
-Not identified in parsed mapping.
+Not identified in available migration evidence.
 
 
 ==================================================
 MIGRATION RISK RULES
 ==================================================
 
-Only list a migration risk when supported by evidence in
-the parsed mapping.
+Only list a migration risk when supported by available
+migration evidence.
 
-Do NOT create speculative risks such as:
+Do not create speculative risks.
 
-- hidden logic may exist
-- workflow logic may exist
-- session SQL may exist
-- other mappings may modify the data
-- external dependencies may exist
-
-unless such evidence appears in the parsed mapping.
-
-Missing configuration may be listed as UNRESOLVED,
-but it must not be converted into a hypothetical problem.
+Missing configuration may be listed as UNRESOLVED only when
+that information is required for the migration.
 
 
 ==================================================
 DOCUMENTATION USAGE
 ==================================================
 
-The documentation context is divided into two sources:
+Documentation is generic reference material.
 
-1. POWERCENTER DOCUMENTATION
-   Use it to understand the behavior and semantics of the
-   original Informatica PowerCenter transformations.
+PowerCenter documentation explains what a transformation CAN
+do. It does not prove that a capability is used in this mapping.
 
-2. DATABRICKS DOCUMENTATION
-   Use it as reference material for identifying appropriate
-   Databricks and PySpark equivalents.
+Databricks documentation describes available target mechanisms.
+It does not justify introducing implementation logic that is
+not required by the mapping.
 
-The parsed PowerCenter mapping remains the source of truth.
-
-Documentation is generic reference material only.
-
-PowerCenter documentation explains what a transformation CAN do.
-It does NOT prove that a capability is used in this mapping.
-
-Databricks documentation explains available target mechanisms.
-It does NOT justify introducing implementation logic that is not
-required by the parsed mapping.
-
-Never use either documentation source to invent mapping-specific
-logic, configuration, behavior, or dependencies.
-
-Parsed mapping evidence always takes precedence over all
-documentation.
-
-Documentation metadata may be used to identify material that a human
-reviewer should inspect.
-
-When creating a HUMAN_REVIEW_SUGGESTION, cite the available metadata
-when present, for example:
-
-- product
-- version
-- document_type
-- page_number
-- source
-
-Do not invent a document title, page number, version, or source that
-is not present in the documentation context.
+Parsed mapping evidence and deterministic facts always take
+precedence over documentation.
 
 
 ==================================================
@@ -575,10 +619,8 @@ PYSPARK RULE
 Do NOT generate complete PySpark source code yet.
 
 You may identify a conceptual Databricks/PySpark equivalent
-only when it follows directly from the mapping.
-
-Do not include guessed configuration values or implementation
-details.
+only when it follows directly from the available migration
+evidence.
 
 
 ==================================================
@@ -586,6 +628,13 @@ PARSED POWERCENTER MAPPING
 ==================================================
 
 {mapping_context}
+
+
+==================================================
+DETERMINISTIC RUNTIME FACTS
+==================================================
+
+{runtime_context}
 
 
 ==================================================
@@ -608,7 +657,7 @@ Mapping name:
 Purpose:
 
 If purpose is not explicitly identifiable:
-Not identified in parsed mapping.
+Not identified in available migration evidence.
 
 
 ==================================================
@@ -662,8 +711,9 @@ Unresolved information:
 - ...
 
 Human review suggestion:
-- Include this section only when a documented, reasonable migration
-  approach exists but human validation is still required.
+- Include this section only when a documented, reasonable
+  migration approach exists but human validation is still
+  required.
 - Otherwise omit it.
 
 
@@ -695,7 +745,7 @@ Unresolved information:
 DATA FLOW
 ==================================================
 
-Represent only the connections explicitly present in
+Represent only connections explicitly present in
 the parsed mapping.
 
 
@@ -705,14 +755,11 @@ MIGRATION RISKS / UNRESOLVED
 
 List only:
 
-- unresolved information explicitly visible from the mapping
+- unresolved information explicitly supported by evidence
 - migration requirements that cannot yet be implemented safely
-- HUMAN_REVIEW_SUGGESTION items that remain pending human approval
+- HUMAN_REVIEW_SUGGESTION items pending human approval
 
 Do not include speculative risks.
-
-A HUMAN_REVIEW_SUGGESTION must never be reported as a completed
-migration decision.
 
 
 ==================================================
@@ -722,20 +769,17 @@ HUMAN REVIEW SUGGESTIONS
 When an implementation cannot be determined safely, keep the
 implementation classified as UNRESOLVED.
 
-However, when the available PowerCenter or Databricks documentation
-provides enough information to identify a reasonable migration
-approach, you MAY add a separate HUMAN_REVIEW_SUGGESTION.
-
-The suggestion must use this structure:
+When documentation provides enough information for a reasonable
+possible approach, you MAY add:
 
 Human review suggestion:
 [HUMAN_REVIEW_SUGGESTION]
 
 Possible approach:
-<describe the possible Databricks approach>
+<possible Databricks approach>
 
 Why human review is required:
-<explain what information is still missing>
+<missing information>
 
 Documentation to review:
 - Product: <metadata value if available>
@@ -750,62 +794,28 @@ LOW or MEDIUM
 Suggested PySpark / Python:
 <optional conceptual code>
 
-Rules for suggested code:
-
-- Suggested code is NOT approved migration code.
-- Suggested code is for human review only.
-- Suggested code must not contain invented configuration values.
-- Suggested code must not invent mapping-specific behavior.
-- Suggested code must not be treated as executable migration output.
-- The final PySpark generator will be responsible for rendering
-  HUMAN_REVIEW_SUGGESTION code as comments only.
-- The underlying migration action must remain UNRESOLVED.
-- If there is not enough evidence even for a reasonable suggestion,
-  do not create a HUMAN_REVIEW_SUGGESTION.
-
-
-==================================================
-NO SPECULATIVE VALIDATION
-==================================================
-
-Do not ask the user to confirm hypothetical missing logic.
-
-Do NOT write statements such as:
-
-- confirm that no hidden logic exists
-- verify that no hidden calculations are required
-- potential hidden logic
-- check whether additional business rules exist
-
-If no such logic is present in the parsed mapping,
-simply state what was identified.
-
-Absence of evidence is UNRESOLVED only when that missing
-information is required for the migration.
+Suggested code is NOT approved executable migration code.
 
 
 ==================================================
 FINAL SELF-CHECK
 ==================================================
 
-Before producing the answer, verify:
+Before producing the answer verify:
 
+- Did I contradict a deterministic runtime fact?
+- Did I mark a resolved runtime variable as unresolved?
+- Did I ignore populated Target Pre SQL or Post SQL?
 - Did I invent a filter?
 - Did I invent a join?
 - Did I invent an SQL override?
 - Did I invent a file path?
-- Did I invent header or write mode?
+- Did I invent write mode?
 - Did I invent variable semantics?
-- Did I invent collect/first/last/agg logic?
-- Did I infer downstream usage not shown in DATA FLOW?
-- Did I treat documentation capabilities as actual mapping logic?
-- Did I present a HUMAN_REVIEW_SUGGESTION as a confirmed solution?
-- Did I create suggested code without keeping the implementation
-  UNRESOLVED?
-- Did I invent documentation metadata or references?
+- Did I infer behavior not present in the evidence?
+- Did I present a HUMAN_REVIEW_SUGGESTION as confirmed?
 
-If the answer to any question is YES,
-remove or correct that statement before returning the migration plan.
+If YES, correct the migration plan before returning it.
 """
 
 
@@ -813,21 +823,32 @@ def create_migration_plan_node(
     state: AgentState,
 ) -> dict:
     """
-    Create a migration plan for every PowerCenter mapping.
+    Create a migration plan for the selected
+    PowerCenter mapping.
 
-    Each mapping is analyzed independently to keep prompts
-    smaller and avoid truncated LLM responses.
+    The planner receives:
 
-    Cached plans are reused when available.
-    Newly generated plans are saved immediately so
-    interrupted executions can resume without repeating
-    already completed LLM calls.
+    - parsed mapping facts;
+    - Target instance TABLEATTRIBUTE metadata;
+    - deterministic runtime-variable facts;
+    - retrieved PowerCenter/Databricks documentation.
+
+    Cached plans are versioned so changes to planner
+    evidence do not silently reuse stale plans.
     """
 
-    print("\nCreating migration plans...")
+    print(
+        "\nCreating migration plans..."
+    )
 
     mapping = state["mapping"]
     xml_path = state["xml_path"]
+    powercenter_project = (
+        state["powercenter_project"]
+    )
+
+    session = state["session"]
+    workflow = state["workflow"]
 
     retrieved_docs = state.get(
         "retrieved_docs",
@@ -840,17 +861,15 @@ def create_migration_plan_node(
         )
     )
 
-    pc_mappings = mapping.get(
-        "mappings",
-        [],
-    )
+    pc_mappings = [
+        mapping
+    ]
 
     print(
         f"Mappings to analyze: "
         f"{len(pc_mappings)}"
     )
 
-    # Load plans already generated for this XML.
     migration_plans = load_migration_plans(
         source_xml=xml_path,
     )
@@ -872,11 +891,16 @@ def create_migration_plan_node(
         )
 
         # ---------------------------------------------
-        # CACHE HIT
+        # VERSIONED CACHE KEY
         # ---------------------------------------------
 
+        cache_key = (
+            f"{mapping_name}"
+            f"::{PLANNER_CONTEXT_VERSION}"
+        )
+
         cached_plan = migration_plans.get(
-            mapping_name
+            cache_key
         )
 
         if (
@@ -888,6 +912,11 @@ def create_migration_plan_node(
             )
 
             print(
+                f"Planner context version: "
+                f"{PLANNER_CONTEXT_VERSION}"
+            )
+
+            print(
                 f"Cached plan characters: "
                 f"{len(cached_plan)}"
             )
@@ -895,12 +924,12 @@ def create_migration_plan_node(
             continue
 
         # ---------------------------------------------
-        # BUILD CONTEXT
+        # MAPPING CONTEXT
         # ---------------------------------------------
 
         single_mapping = (
             build_single_mapping_input(
-                full_mapping=mapping,
+                full_mapping=powercenter_project,
                 pc_mapping=pc_mapping,
             )
         )
@@ -917,18 +946,41 @@ def create_migration_plan_node(
         )
 
         # ---------------------------------------------
-        # BUILD PROMPT
+        # DETERMINISTIC RUNTIME CONTEXT
+        # ---------------------------------------------
+
+        runtime_context = (
+            build_runtime_context(
+                mapping=pc_mapping,
+                session=session,
+                workflow=workflow,
+            )
+        )
+
+        print(
+            "Runtime context characters: "
+            f"{len(runtime_context)}"
+        )
+
+        print(
+            "Planner context version: "
+            f"{PLANNER_CONTEXT_VERSION}"
+        )
+
+        # ---------------------------------------------
+        # PROMPT
         # ---------------------------------------------
 
         prompt = build_prompt(
             mapping_context=mapping_context,
+            runtime_context=runtime_context,
             documentation_context=(
                 documentation_context
             ),
         )
 
         # ---------------------------------------------
-        # CALL LLM
+        # LLM
         # ---------------------------------------------
 
         try:
@@ -936,8 +988,10 @@ def create_migration_plan_node(
                 "Sending mapping to LLM..."
             )
 
-            response = invoke_planner_with_retry(
-                prompt=prompt,
+            response = (
+                invoke_planner_with_retry(
+                    prompt=prompt,
+                )
             )
 
             print(
@@ -948,7 +1002,19 @@ def create_migration_plan_node(
                 response.content
             )
 
-            if not migration_plan.strip():
+            if not isinstance(
+                migration_plan,
+                str,
+            ):
+                migration_plan = str(
+                    migration_plan
+                )
+
+            migration_plan = (
+                migration_plan.strip()
+            )
+
+            if not migration_plan:
                 raise ValueError(
                     "LLM returned an empty "
                     "migration plan for mapping: "
@@ -956,11 +1022,9 @@ def create_migration_plan_node(
                 )
 
             migration_plans[
-                mapping_name
+                cache_key
             ] = migration_plan
 
-            # Save immediately after every successful
-            # mapping so progress is never lost.
             save_migration_plans(
                 source_xml=xml_path,
                 migration_plans=migration_plans,
@@ -984,7 +1048,7 @@ def create_migration_plan_node(
             raise
 
     # ---------------------------------------------
-    # VALIDATE THAT ALL MAPPINGS HAVE A PLAN
+    # VALIDATE CACHE / GENERATED PLANS
     # ---------------------------------------------
 
     missing_mappings = []
@@ -995,8 +1059,13 @@ def create_migration_plan_node(
             "UNKNOWN_MAPPING",
         )
 
+        cache_key = (
+            f"{mapping_name}"
+            f"::{PLANNER_CONTEXT_VERSION}"
+        )
+
         plan = migration_plans.get(
-            mapping_name
+            cache_key
         )
 
         if (
@@ -1014,10 +1083,12 @@ def create_migration_plan_node(
         )
 
     # ---------------------------------------------
-    # BUILD COMBINED PLAN IN ORIGINAL MAPPING ORDER
+    # BUILD COMBINED PLAN
     # ---------------------------------------------
 
     ordered_plans = []
+
+    output_migration_plans = {}
 
     for pc_mapping in pc_mappings:
         mapping_name = pc_mapping.get(
@@ -1025,34 +1096,41 @@ def create_migration_plan_node(
             "UNKNOWN_MAPPING",
         )
 
-        ordered_plans.append(
-            migration_plans[
-                mapping_name
-            ]
+        cache_key = (
+            f"{mapping_name}"
+            f"::{PLANNER_CONTEXT_VERSION}"
         )
+
+        plan = migration_plans[
+            cache_key
+        ]
+
+        ordered_plans.append(
+            plan
+        )
+
+        # Agent state keeps the normal mapping name as
+        # its public key. Cache implementation details
+        # do not leak into downstream nodes.
+        output_migration_plans[
+            mapping_name
+        ] = plan
 
     combined_plan = "\n\n".join(
         ordered_plans
     )
 
     # ---------------------------------------------
-    # DEBUG OUTPUT
+    # DEBUG
     # ---------------------------------------------
 
     print(
         "\nMigration plans available:"
     )
 
-    for pc_mapping in pc_mappings:
-        mapping_name = pc_mapping.get(
-            "name",
-            "UNKNOWN_MAPPING",
-        )
-
-        plan = migration_plans[
-            mapping_name
-        ]
-
+    for mapping_name, plan in (
+        output_migration_plans.items()
+    ):
         print(
             f"- {mapping_name}: "
             f"{len(plan)} characters"
@@ -1060,5 +1138,7 @@ def create_migration_plan_node(
 
     return {
         "migration_plan": combined_plan,
-        "migration_plans": migration_plans,
+        "migration_plans": (
+            output_migration_plans
+        ),
     }

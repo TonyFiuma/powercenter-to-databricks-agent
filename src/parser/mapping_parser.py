@@ -231,6 +231,10 @@ def parse_instances(
     """
     Extract instances from a PowerCenter
     mapping or mapplet.
+
+    Instance-level TABLEATTRIBUTE values are
+    preserved because they may contain runtime
+    semantics such as Target Pre SQL and Post SQL.
     """
 
     instances = []
@@ -242,21 +246,23 @@ def parse_instances(
             "name": instance.get(
                 "NAME"
             ),
-
             "transformation_name": (
                 instance.get(
                     "TRANSFORMATION_NAME"
                 )
             ),
-
             "transformation_type": (
                 instance.get(
                     "TRANSFORMATION_TYPE"
                 )
             ),
-
             "type": instance.get(
                 "TYPE"
+            ),
+            "table_attributes": (
+                parse_table_attributes(
+                    instance
+                )
             ),
         }
 
