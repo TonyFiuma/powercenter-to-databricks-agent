@@ -9,6 +9,18 @@ from src.agent.state import AgentState
 from src.agent.nodes.parse_mapping import (
     parse_mapping_node,
 )
+from src.agent.nodes.resolve_version import (
+    resolve_powercenter_version_node,
+)
+from src.agent.nodes.transpile_deterministic_migration import (
+    transpile_deterministic_migration_node,
+)
+from src.agent.nodes.run_deterministic_migration import (
+    run_deterministic_migration_node,
+)
+from src.agent.nodes.validate_deterministic_migration import (
+    validate_deterministic_migration,
+)
 from src.agent.nodes.retrieve_docs import (
     retrieve_docs_node,
 )
@@ -34,9 +46,6 @@ from src.agent.nodes.build_migration_report import (
     build_migration_report_node,
 )
 
-from src.agent.nodes.resolve_version import (
-    resolve_powercenter_version_node,
-)
 
 # ============================================================
 # Configuration
@@ -47,6 +56,67 @@ MAX_CODE_REPAIR_ATTEMPTS = 2
 
 
 # ============================================================
+# Deterministic migration routing
+# ============================================================
+
+def route_after_deterministic_validation(
+    state: AgentState,
+) -> str:
+    """
+    Route the migration according to the
+    deterministic validation gate.
+
+    VALID:
+        deterministic migration is complete.
+
+    REQUIRES_REVIEW:
+        invoke the RAG/LLM fallback.
+
+    UNSUPPORTED:
+        stop automatic migration.
+    """
+
+    status = state.get(
+        "validation_status"
+    )
+
+    if status == "VALID":
+        print(
+            "\nDeterministic migration "
+            "validation passed."
+        )
+        print(
+            "RAG/LLM fallback is not required."
+        )
+        return "valid"
+
+    if status == "REQUIRES_REVIEW":
+        print(
+            "\nDeterministic migration "
+            "requires review."
+        )
+        print(
+            "Starting RAG/LLM fallback."
+        )
+        return "review"
+
+    if status == "UNSUPPORTED":
+        print(
+            "\nDeterministic migration "
+            "contains unsupported semantics."
+        )
+        print(
+            "Automatic migration stopped."
+        )
+        return "unsupported"
+
+    raise ValueError(
+        "Unknown deterministic migration "
+        f"validation status: {status}"
+    )
+
+
+# ============================================================
 # Migration-plan routing
 # ============================================================
 
@@ -54,8 +124,9 @@ def route_after_migration_plan_validation(
     state: AgentState,
 ) -> str:
     """
-    Decide whether migration plans can proceed to PySpark
-    generation or require another repair round.
+    Decide whether migration plans can proceed
+    to PySpark generation or require another
+    repair round.
     """
 
     validation_passed = state.get(
@@ -91,11 +162,12 @@ def route_after_migration_plan_validation(
         >= MAX_MIGRATION_PLAN_REPAIR_ATTEMPTS
     ):
         raise RuntimeError(
-            "Migration plan validation still failed "
-            "after the maximum number of repair "
-            "attempts. PySpark generation has been "
-            "stopped to avoid generating code from "
-            "an invalid migration plan."
+            "Migration plan validation still "
+            "failed after the maximum number "
+            "of repair attempts. PySpark "
+            "generation has been stopped to "
+            "avoid generating code from an "
+            "invalid migration plan."
         )
 
     print(
@@ -115,7 +187,8 @@ def route_after_code_validation(
     state: AgentState,
 ) -> str:
     """
-    Decide what to do after generated PySpark validation.
+    Decide what to do after generated PySpark
+    validation.
     """
 
     validation_passed = state.get(
@@ -170,22 +243,26 @@ def route_after_code_validation(
 
 def build_graph():
     """
-    Build the deterministic PowerCenter -> Databricks
+    Build the hybrid PowerCenter -> Databricks
     migration workflow.
 
-    Flow:
+    Primary path:
 
-    parser
-    -> PowerCenter version resolution
-    -> retrieval
-    -> migration planner
-    -> migration-plan validator
-        -> repair loop when needed
-    -> PySpark generator
-    -> PySpark validator
-        -> repair loop when needed
-    -> migration artifact export
-    -> END
+        parser
+        -> version resolution
+        -> deterministic transpilation
+        -> deterministic validation
+
+    Routing:
+
+        VALID
+            -> END
+
+        REQUIRES_REVIEW
+            -> RAG/LLM migration fallback
+
+        UNSUPPORTED
+            -> END
     """
 
     graph = StateGraph(
@@ -193,7 +270,7 @@ def build_graph():
     )
 
     # --------------------------------------------------------
-    # Nodes
+    # Deterministic nodes
     # --------------------------------------------------------
 
     graph.add_node(
@@ -205,6 +282,25 @@ def build_graph():
         "resolve_powercenter_version",
         resolve_powercenter_version_node,
     )
+
+    graph.add_node(
+        "transpile_deterministic_migration",
+        transpile_deterministic_migration_node,
+    )
+
+    graph.add_node(
+        "run_deterministic_migration",
+        run_deterministic_migration_node,
+    )
+
+    graph.add_node(
+        "validate_deterministic_migration",
+        validate_deterministic_migration,
+    )
+
+    # --------------------------------------------------------
+    # AI / RAG fallback nodes
+    # --------------------------------------------------------
 
     graph.add_node(
         "retrieve_docs",
@@ -247,7 +343,7 @@ def build_graph():
     )
 
     # --------------------------------------------------------
-    # Main flow
+    # Primary deterministic flow
     # --------------------------------------------------------
 
     graph.add_edge(
@@ -262,8 +358,36 @@ def build_graph():
 
     graph.add_edge(
         "resolve_powercenter_version",
-        "retrieve_docs",
+        "transpile_deterministic_migration",
     )
+
+    graph.add_edge(
+        "transpile_deterministic_migration",
+        "run_deterministic_migration",
+    )
+
+    graph.add_edge(
+        "run_deterministic_migration",
+        "validate_deterministic_migration",
+    )
+
+    # --------------------------------------------------------
+    # Deterministic gate
+    # --------------------------------------------------------
+
+    graph.add_conditional_edges(
+        "validate_deterministic_migration",
+        route_after_deterministic_validation,
+        {
+            "valid": END,
+            "review": "retrieve_docs",
+            "unsupported": END,
+        },
+    )
+
+    # --------------------------------------------------------
+    # RAG / LLM fallback
+    # --------------------------------------------------------
 
     graph.add_edge(
         "retrieve_docs",

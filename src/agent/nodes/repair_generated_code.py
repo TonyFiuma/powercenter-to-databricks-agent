@@ -24,9 +24,6 @@ from src.storage.generated_code_store import (
 )
 
 
-llm = get_generator_llm()
-
-
 HUMAN_REVIEW_BEGIN_MARKER = (
     "BEGIN HUMAN_REVIEW_SUGGESTION"
 )
@@ -393,6 +390,8 @@ def repair_generated_code_node(
         # ----------------------------------------------------
 
         try:
+            llm = get_generator_llm()
+
             response = llm.invoke(
                 prompt
             )
@@ -417,30 +416,6 @@ def repair_generated_code_node(
             # Keep original code instead of
             # destroying the previous generation.
             continue
-
-        repaired_code = response.content
-
-        if not isinstance(
-            repaired_code,
-            str,
-        ):
-            repaired_code = str(
-                repaired_code
-            )
-
-        repaired_code = (
-            repaired_code.strip()
-        )
-
-        print(
-            "Repair response received."
-        )
-
-        print(
-            "Repaired PySpark characters "
-            "before safety enforcement: "
-            f"{len(repaired_code)}"
-        )
 
         # ----------------------------------------------------
         # HUMAN REVIEW deterministic safety enforcement

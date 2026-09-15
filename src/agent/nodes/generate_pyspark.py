@@ -25,8 +25,6 @@ from src.storage.generated_code_store import (
 )
 
 
-llm = get_generator_llm()
-
 
 def generate_pyspark_node(
     state: AgentState,
@@ -233,6 +231,8 @@ def generate_pyspark_node(
         # ==============================================
 
         try:
+            llm = get_generator_llm()
+
             response = llm.invoke(
                 prompt
             )
@@ -261,7 +261,6 @@ def generate_pyspark_node(
             traceback.print_exc()
 
             raise
-
         # ==============================================
         # Extract generated code
         # ==============================================

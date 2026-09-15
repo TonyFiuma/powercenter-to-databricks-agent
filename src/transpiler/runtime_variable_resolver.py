@@ -1,5 +1,12 @@
 from typing import Any
 
+from src.transpiler.resolved_runtime_variable import (
+    ResolvedRuntimeVariable,
+)
+from src.transpiler.runtime_parameter import (
+    extract_mapping_runtime_parameters,
+)
+
 
 def build_session_variable_bindings(
     session: dict[str, Any],
@@ -85,12 +92,6 @@ def resolve_mapping_runtime_variable(
     """
     Resolve a PowerCenter mapping runtime
     variable through the session bindings.
-
-    Example:
-
-        $$m_DT_RIFERIMENTO
-            ->
-        $$DT_RIFERIMENTO
     """
 
     bindings = build_session_variable_bindings(
@@ -106,36 +107,29 @@ def resolve_runtime_variable(
     raw_name: str,
     session: dict[str, Any],
     workflow: dict[str, Any],
-) -> str | None:
+) -> ResolvedRuntimeVariable:
     """
-    Resolve a mapping runtime variable through
-    both session bindings and workflow variable
-    assignments.
+    Resolve a PowerCenter mapping runtime variable
+    and classify its runtime origin.
 
-    Examples:
+    Resolution types:
 
-        $$m_DT_LOAD
-            ->
-        $$wf_DT_LOAD
-            ->
-        SYSDATE
-
-        $$m_DT_RIFERIMENTO
-            ->
-        $$DT_RIFERIMENTO
-
-    If the workflow variable is not internally
-    assigned, the workflow variable name is
-    returned unchanged.
+        computed
+        external
+        unresolved
     """
 
-    resolved = resolve_mapping_runtime_variable(
+    session_value = resolve_mapping_runtime_variable(
         raw_name=raw_name,
         session=session,
     )
 
-    if resolved is None:
-        return None
+    if session_value is None:
+        return ResolvedRuntimeVariable(
+            source_name=raw_name,
+            resolved_value=None,
+            resolution_type="unresolved",
+        )
 
     workflow_assignments = (
         build_workflow_variable_assignments(
@@ -143,7 +137,53 @@ def resolve_runtime_variable(
         )
     )
 
-    return workflow_assignments.get(
-        resolved,
-        resolved,
+    computed_value = workflow_assignments.get(
+        session_value
     )
+
+    if computed_value is not None:
+        return ResolvedRuntimeVariable(
+            source_name=raw_name,
+            resolved_value=computed_value,
+            resolution_type="computed",
+        )
+
+    return ResolvedRuntimeVariable(
+        source_name=raw_name,
+        resolved_value=session_value,
+        resolution_type="external",
+    )
+
+
+def resolve_mapping_runtime_variables(
+    mapping: dict[str, Any],
+    session: dict[str, Any],
+    workflow: dict[str, Any],
+) -> list[ResolvedRuntimeVariable]:
+    """
+    Discover all runtime variables referenced by
+    a mapping and resolve their runtime origin.
+
+    The mapping expressions are scanned
+    automatically, then every discovered variable
+    is resolved through the session and workflow.
+    """
+
+    runtime_parameters = (
+        extract_mapping_runtime_parameters(
+            mapping
+        )
+    )
+
+    resolved_variables = []
+
+    for parameter in runtime_parameters:
+        resolved_variables.append(
+            resolve_runtime_variable(
+                raw_name=parameter.raw_name,
+                session=session,
+                workflow=workflow,
+            )
+        )
+
+    return resolved_variables

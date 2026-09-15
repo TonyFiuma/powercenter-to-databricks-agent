@@ -18,9 +18,6 @@ from src.storage.migration_plan_store import (
     save_migration_plans,
 )
 
-
-llm = get_planner_llm()
-
 MAX_LLM_RETRIES = 3
 RETRY_WAIT_SECONDS = 4
 
@@ -34,7 +31,12 @@ def invoke_planner_with_retry(
 
     Only Groq RateLimitError exceptions are retried.
     All other failures are propagated immediately.
+
+    The planner LLM is initialized lazily so that
+    deterministic migrations do not initialize it.
     """
+
+    llm = get_planner_llm()
 
     print(
         "Planner prompt characters: "

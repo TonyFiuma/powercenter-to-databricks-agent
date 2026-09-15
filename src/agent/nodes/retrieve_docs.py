@@ -17,16 +17,18 @@ from src.rag.databricks_retriever import (
 )
 
 
-powercenter_vectorstore = load_vectorstore()
-databricks_vectorstore = load_databricks_vectorstore()
-
-
-def retrieve_docs_node(state: AgentState) -> dict:
+def retrieve_docs_node(
+    state: AgentState,
+) -> dict:
     """
     Retrieve PowerCenter and Databricks documentation
     for each transformation found in the parsed mapping.
 
     PowerCenter retrieval is version-aware.
+
+    Vector stores are loaded lazily so that the RAG
+    infrastructure is initialized only when this node
+    is actually executed.
     """
 
     mapping = state["mapping"]
@@ -37,8 +39,25 @@ def retrieve_docs_node(state: AgentState) -> dict:
 
     if not powercenter_version:
         raise ValueError(
-            "PowerCenter version not found in agent state."
+            "PowerCenter version not found "
+            "in agent state."
         )
+
+    # --------------------------------------------------
+    # Lazy RAG initialization
+    # --------------------------------------------------
+
+    print(
+        "\nInitializing RAG vector stores."
+    )
+
+    powercenter_vectorstore = (
+        load_vectorstore()
+    )
+
+    databricks_vectorstore = (
+        load_databricks_vectorstore()
+    )
 
     transformation_types = (
         extract_transformation_types(
@@ -163,6 +182,8 @@ def retrieve_docs_node(state: AgentState) -> dict:
         "retrieval_query": "\n".join(
             retrieval_queries
         ),
-        "retrieval_filters": retrieval_filters,
+        "retrieval_filters": (
+            retrieval_filters
+        ),
         "retrieved_docs": all_docs,
     }

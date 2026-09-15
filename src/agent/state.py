@@ -1,46 +1,65 @@
-from typing import TypedDict, Any
+from typing import Any, TypedDict
 
 
 class AgentState(TypedDict, total=False):
     """
-    Shared state of the PowerCenter -> Databricks migration graph.
+    Shared state of the PowerCenter -> Databricks
+    migration agent.
+
+    The state contains both deterministic
+    transpilation results and AI/RAG fallback
+    information.
     """
 
     # Input
     xml_path: str
+    mapping_name: str
 
     # PowerCenter metadata
-    powercenter_version: str
-    powercenter_version_source: str
+    powercenter_version: str | None
+    powercenter_version_source: str | None
 
-    # Parser output
+    # Complete parsed PowerCenter document
+    powercenter_project: dict[str, Any]
+
+    # Selected PowerCenter execution context
     mapping: dict[str, Any]
+    mapplets: list[dict[str, Any]]
+    workflow: dict[str, Any]
+    session: dict[str, Any]
 
     # Transformation analysis
     detected_transformations: list[str]
     unsupported_transformations: list[str]
 
-    # RAG
+    # Deterministic transpilation
+    powercenter_sql: str
+    databricks_sql: str
+
+    # Validation
+    mapping_validation: Any
+    sql_validation: Any
+    migration_validation: Any
+    validation_status: str
+    validation_issues: list[Any]
+
+    # RAG fallback
     retrieval_query: str
-    retrieval_filters: dict[str, Any]
+    filters: dict[str, Any]
     retrieved_docs: list[Any]
 
-    # Migration plans
+    # AI migration fallback
     migration_plan: str
-    migration_plans: dict[str, str]
+    pyspark_code: str
 
-    # Migration-plan validation
-    migration_plan_validation_results: list[dict[str, Any]]
+    # Migration-plan validation / repair
     migration_plan_validation_passed: bool
     migration_plan_repair_attempts: int
 
-    # Generated PySpark
-    pyspark_code: str
-    generated_codes: dict[str, str]
-
-    # Generated-code validation
-    validation_results: list[dict[str, Any]]
+    # Generated-code validation / repair
+    validation_results: list[Any]
     validation_passed: bool
-    validation_status: str
-    validation_issues: list[dict[str, Any]]
     repair_attempts: int
+
+    # Final output
+    migration_report: str
